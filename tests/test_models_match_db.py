@@ -23,7 +23,7 @@ async def test_every_table_has_a_model(db_session: AsyncSession) -> None:
     rows = (await db_session.execute(COLUMNS_SQL)).all()
     db_tables = {row.table_name for row in rows}
     assert db_tables == set(Base.metadata.tables)
-    assert len(db_tables) == 22
+    assert len(db_tables) == 24
 
 
 async def test_columns_and_nullability_match(db_session: AsyncSession) -> None:

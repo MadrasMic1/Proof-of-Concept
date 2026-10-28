@@ -1,5 +1,5 @@
 # app/models/__init__.py
-"""Importing this package registers all 22 tables on Base.metadata."""
+"""Importing this package registers all 24 tables on Base.metadata."""
 
 from app.db.base import Base
 from app.models.ai import AiPromptVersion, AiWorkflowRun
@@ -18,7 +18,7 @@ from app.models.inventory import (
     NetworkEvent,
     RawNetworkEvent,
 )
-from app.models.itsm import Appointment, Incident, IncidentJournal
+from app.models.itsm import Appointment, Incident, IncidentJournal, ItsmInbox, ItsmSyncState
 from app.models.master import AssignmentGroup, DeviceType, NetworkElementType, Store
 
 __all__ = [
@@ -34,6 +34,8 @@ __all__ = [
     "EventProcessingRun",
     "Incident",
     "IncidentJournal",
+    "ItsmInbox",
+    "ItsmSyncState",
     "NetworkElement",
     "NetworkElementCurrentStatus",
     "NetworkElementType",

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import CHAR, Numeric, SmallInteger, text
+from sqlalchemy import CHAR, Integer, Numeric, SmallInteger, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, CreatedAt, JsonObject, ServiceNowSysId, UpdatedAt, UUIDPk
@@ -30,6 +30,7 @@ class Store(Base):
     contact_email: Mapped[str | None]
     status: Mapped[str] = mapped_column(server_default=text("'open'"))
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_location_id: Mapped[int | None] = mapped_column(Integer, unique=True)
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 
@@ -42,6 +43,7 @@ class AssignmentGroup(Base):
     description: Mapped[str | None]
     email: Mapped[str | None]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_group_id: Mapped[int | None] = mapped_column(Integer, unique=True)
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 

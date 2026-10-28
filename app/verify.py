@@ -44,7 +44,7 @@ from app.models.values import (
 )
 from app.worker.guards import answer_of, find_internal_detail, request_problem
 
-EXPECTED_TABLES = 22
+EXPECTED_TABLES = 24
 ONE_OPEN_ACTION_INDEX = "ux_action_one_open_per_incident"
 CHENNAI = "01234"
 CHENNAI_INCIDENTS = {
@@ -104,7 +104,7 @@ async def _structure(session: AsyncSession) -> list[CheckResult]:
     return [
         CheckResult("structure", "migration at head", current == head,
                     f"revision {current} (head {head})"),
-        CheckResult("structure", "22 tables", tables == EXPECTED_TABLES, f"{tables} tables"),
+        CheckResult("structure", "24 tables", tables == EXPECTED_TABLES, f"{tables} tables"),
         CheckResult("structure", "one-open-action index", bool(index),
                     "present" if index else f"{ONE_OPEN_ACTION_INDEX} missing"),
     ]  # fmt: skip

@@ -2,25 +2,32 @@
 """Group 3: ITSM. incident_journal is also the worker queue.
 
 Every appointment belongs to an incident (incident_id is NOT NULL since revision 0002).
+GLPI sync (revision 0004): glpi_* ids link incidents and journal entries to GLPI;
+itsm_inbox is the sync work queue and itsm_sync_state the scheduled sync jobs.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Computed,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
+    Integer,
     SmallInteger,
     UniqueConstraint,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, CreatedAt, ServiceNowSysId, UpdatedAt, UUIDPk
+from app.db.base import Base, CreatedAt, JsonObject, ServiceNowSysId, UpdatedAt, UUIDPk
 
 
 class Incident(Base):
@@ -70,6 +77,9 @@ class Incident(Base):
     close_code: Mapped[str | None]
     close_notes: Mapped[str | None]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_ticket_id: Mapped[int | None] = mapped_column(Integer, unique=True)
+    itsm_updated_at: Mapped[datetime | None]
+    last_synced_at: Mapped[datetime | None]
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 
@@ -90,6 +100,7 @@ class IncidentJournal(Base):
     last_error: Mapped[str | None]
     processed_at: Mapped[datetime | None]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_followup_id: Mapped[int | None] = mapped_column(Integer, unique=True)
     created_at: Mapped[CreatedAt]
 
 
@@ -119,5 +130,38 @@ class Appointment(Base):
     created_by: Mapped[str]
     source: Mapped[str]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+
+class ItsmInbox(Base):
+    __tablename__ = "itsm_inbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    glpi_ticket_id: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str]
+    events: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    merged_count: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    available_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    last_error: Mapped[str | None]
+    received_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    processed_at: Mapped[datetime | None]
+    updated_at: Mapped[UpdatedAt]
+
+
+class ItsmSyncState(Base):
+    __tablename__ = "itsm_sync_state"
+
+    job_name: Mapped[str] = mapped_column(primary_key=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer)
+    next_run_at: Mapped[datetime]
+    watermark: Mapped[datetime | None]
+    last_started_at: Mapped[datetime | None]
+    last_success_at: Mapped[datetime | None]
+    consecutive_failures: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    last_error: Mapped[str | None]
+    details: Mapped[JsonObject]
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]

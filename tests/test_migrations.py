@@ -12,7 +12,7 @@ from sqlalchemy.pool import NullPool
 
 from app.db.migrate import alembic_config
 
-EXPECTED_TABLES = 22
+EXPECTED_TABLES = 24
 
 
 async def _table_count(url: str) -> int:

@@ -17,7 +17,7 @@ uv sync                                   # create .venv from uv.lock
 Copy-Item .env.example .env               # then fill in passwords
 uv run python -m scripts.db_bootstrap     # role ric_app + ric_poc + ric_poc_test
 uv run python -m scripts.check_env        # all checks must pass
-uv run alembic upgrade head               # create the 22 tables (revisions 0001-0002)
+uv run alembic upgrade head               # create the 24 tables (revisions 0001-0004)
 uv run python -m scripts.db_status        # revision and table count must be OK
 uv run python -m scripts.seed all         # load the POC seed data (network, ITSM, notifications)
 uv run pytest                             # tests (use ric_poc_test, never ric_poc)
@@ -339,7 +339,8 @@ uv run python -m scripts.process_events --rebuild --as-of 2026-10-13T09:00:00Z
 
 - The schema is defined in plain SQL in `migrations/sql/` and applied by Alembic revisions in
   `migrations/versions/`. `0001` creates the full POC schema (22 tables); `0002` adds the incident
-  number sequence and makes `appointments.incident_id` required; `0003` allows at most one open store action per incident.
+  number sequence and makes `appointments.incident_id` required; `0003` allows at most one open store action per incident. 0004 adds the GLPI sync: GLPI ids on stores, assignment groups, network elements,
+  devices, incidents and journal entries, plus the itsm_inbox and itsm_sync_state tables (24 tables).
 - Models in `app/models/` describe columns and keys only. CHECK constraints, partial indexes and
   triggers live in the database. `tests/test_models_match_db.py` fails if models and database differ.
 - Allowed values for constrained text columns are in `app/models/values.py`.
@@ -347,6 +348,27 @@ uv run python -m scripts.process_events --rebuild --as-of 2026-10-13T09:00:00Z
 - New schema changes: add a new revision with
   `uv run alembic revision -m "<what changed>" --rev-id 0003` and write the `op.*` calls by hand.
   Do not rely on `--autogenerate`: it does not understand the SQL-defined checks, indexes and triggers.
+
+## GLPI sync schema (revision 0004)
+
+GLPI is the ITSM of record; RIC keeps a synchronized copy of the incidents of its stores.
+Phase 13 adds only the schema; the sync itself comes in later phases.
+
+| Table / column | Purpose |
+|---|---|
+| `stores.glpi_location_id` | GLPI Location of the store (location name starts with the site code) |
+| `assignment_groups.glpi_group_id` | GLPI Group |
+| `network_elements` / `devices`: `glpi_itemtype`, `glpi_item_id` | The GLPI asset (NetworkEquipment, Computer, Printer, Peripheral); both or neither; unique as a pair |
+| `incidents.glpi_ticket_id` | GLPI Ticket |
+| `incidents.itsm_updated_at` | GLPI `date_mod` of the last applied snapshot; older snapshots are ignored |
+| `incidents.last_synced_at` | When RIC last applied a GLPI snapshot |
+| `incident_journal.glpi_followup_id` | GLPI follow-up; one journal row per follow-up |
+| `itsm_inbox` | Sync work queue: one row per GLPI ticket to sync; at most one pending row per ticket, so webhooks arriving together are merged |
+| `itsm_sync_state` | Scheduled sync jobs: next run, watermark, last result |
+
+All GLPI ids are unique: one GLPI object can never be linked to two RIC rows.
+New allowed values: `incident_journal.source` = `glpi`, `audit_log.source` = `itsm_sync`.
+The `servicenow_sys_id` columns are kept and are not used by the GLPI sync.
 
 ## Code layout
 

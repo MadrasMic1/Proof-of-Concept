@@ -58,6 +58,10 @@ VALUE_LISTS: list[tuple[str, str, type[Enum]]] = [
     ("api_request_log", "client_app", v.ClientApp),
     ("event_processing_runs", "mode", v.ProcessingRunMode),
     ("event_processing_runs", "status", v.ProcessingRunStatus),
+    ("network_elements", "glpi_itemtype", v.GlpiItemtype),
+    ("devices", "glpi_itemtype", v.GlpiItemtype),
+    ("itsm_inbox", "status", v.InboxStatus),
+    ("itsm_inbox", "source", v.InboxSource),
 ]
 
 CHECKS_SQL = text(

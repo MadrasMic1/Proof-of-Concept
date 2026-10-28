@@ -59,6 +59,15 @@ class MatchedBy(StrEnum):
     NONE = "none"
 
 
+class GlpiItemtype(StrEnum):
+    """GLPI asset types that network_elements / devices can be linked to."""
+
+    NETWORK_EQUIPMENT = "NetworkEquipment"
+    COMPUTER = "Computer"
+    PRINTER = "Printer"
+    PERIPHERAL = "Peripheral"
+
+
 # --- ITSM --------------------------------------------------------------------
 class IncidentState(IntEnum):
     NEW = 1
@@ -120,6 +129,7 @@ class JournalSource(StrEnum):
     MOBILE_APP = "mobile_app"
     AGENT = "agent"
     SEED = "seed"
+    GLPI = "glpi"
 
 
 class JournalProcessStatus(StrEnum):
@@ -128,6 +138,26 @@ class JournalProcessStatus(StrEnum):
     DONE = "done"
     SKIPPED = "skipped"
     FAILED = "failed"
+
+
+class InboxStatus(StrEnum):
+    """itsm_inbox.status: the sync of one GLPI ticket."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    DONE = "done"
+    IGNORED = "ignored"
+    CONFLICT = "conflict"
+    FAILED = "failed"
+
+
+class InboxSource(StrEnum):
+    """itsm_inbox.source: what asked for the sync."""
+
+    WEBHOOK = "webhook"
+    RECONCILE = "reconcile"
+    LINK = "link"
+    MANUAL = "manual"
 
 
 class AppointmentType(StrEnum):
@@ -266,6 +296,7 @@ class AuditSource(StrEnum):
     PROCESSOR = "processor"
     AGENT = "agent"
     SEED = "seed"
+    ITSM_SYNC = "itsm_sync"
 
 
 class AuditAction(StrEnum):

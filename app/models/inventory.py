@@ -27,6 +27,7 @@ class NetworkElement(Base):
     __table_args__ = (
         UniqueConstraint("store_id", "name"),
         UniqueConstraint("id", "store_id"),
+        UniqueConstraint("glpi_itemtype", "glpi_item_id"),
         ForeignKeyConstraint(
             ["uplink_element_id", "store_id"],
             ["network_elements.id", "network_elements.store_id"],
@@ -55,6 +56,8 @@ class NetworkElement(Base):
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     attributes: Mapped[JsonObject]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_itemtype: Mapped[str | None]
+    glpi_item_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 
@@ -64,6 +67,7 @@ class Device(Base):
     __table_args__ = (
         UniqueConstraint("store_id", "name"),
         UniqueConstraint("id", "store_id"),
+        UniqueConstraint("glpi_itemtype", "glpi_item_id"),
         ForeignKeyConstraint(
             ["connected_network_element_id", "store_id"],
             ["network_elements.id", "network_elements.store_id"],
@@ -92,6 +96,8 @@ class Device(Base):
     is_active: Mapped[bool] = mapped_column(server_default=text("true"))
     attributes: Mapped[JsonObject]
     servicenow_sys_id: Mapped[ServiceNowSysId]
+    glpi_itemtype: Mapped[str | None]
+    glpi_item_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 

@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.core.config import get_settings
 from app.db.migrate import alembic_config
 
-EXPECTED_TABLES = 22
+EXPECTED_TABLES = 24
 
 TABLE_COUNT_SQL = text(
     """
