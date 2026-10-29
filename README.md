@@ -452,3 +452,29 @@ uv run python -m scripts.itsm_link --relink    # also move links that point else
 
 Reseeding: `scripts.seed master` / `inventory` keep the links. `scripts.seed itsm` recreates
 incidents and journal entries without them: run `scripts.itsm_link` again afterwards.
+
+## Syncing GLPI tickets (Phase 16)
+
+`app/itsm/sync.py` makes one RIC incident match its GLPI ticket: it reads a fresh snapshot
+of the whole ticket (never acts on the event), then in one transaction (advisory lock per
+ticket) applies it through `app/services/incidents.py`, then writes the RIC number back to
+GLPI if it differs.
+
+| GLPI | RIC |
+|---|---|
+| new incident ticket at a RIC store | new incident (its INC external id, or the next number) |
+| fields, assignment, CI, ETA, state 1-3 | updated (an older snapshot never overwrites newer data) |
+| Solved / Closed / solution type "Cancelled" | resolve / resolve + close / cancel, with the usual side effects |
+| reopened after RIC finished it | `conflict`: RIC never reopens |
+| new follow-up | journal entry (IT staff -> pending -> LLM worker); RIC's own writes and store replies skipped |
+| edited follow-up | text updated, not processed again |
+| not an incident, deleted, not a RIC store | `ignored` |
+
+`itsm_inbox` is the work queue (one pending row per ticket). Rows queued by `scripts.itsm_link`
+sync quietly: imported history is skipped, never sent to the LLM.
+
+```powershell
+uv run python -m scripts.itsm_sync --pending              # process the inbox queue
+uv run python -m scripts.itsm_sync --number INC00001234   # one incident
+uv run python -m scripts.itsm_sync --ticket 3             # one GLPI ticket
+```

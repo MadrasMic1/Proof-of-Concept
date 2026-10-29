@@ -45,6 +45,7 @@ from app.models.values import (
     AlertStatus,
     AppointmentStatus,
     AuditAction,
+    AuditSource,
     ContactType,
     HoldReason,
     IncidentCategory,
@@ -141,7 +142,14 @@ def _snapshot(incident: Incident) -> dict[str, Any]:
     return {name: getattr(incident, name) for name in _SNAPSHOT_FIELDS}
 
 
+# The GLPI sync is audited as 'itsm_sync' and journals as 'glpi' (Stage 2).
+_JOURNAL_SOURCE_BY_ACTOR_SOURCE = {str(AuditSource.ITSM_SYNC): str(JournalSource.GLPI)}
+
+
 def _journal_source(actor: ActorContext) -> str:
+    mapped = _JOURNAL_SOURCE_BY_ACTOR_SOURCE.get(str(actor.source))
+    if mapped is not None:
+        return mapped
     try:
         return str(JournalSource(actor.source))
     except ValueError as exc:
@@ -365,8 +373,14 @@ async def create_incident(
     now: datetime,
     *,
     commit: bool = True,
+    number: str | None = None,
+    opened_by: str | None = None,
 ) -> Incident:
-    """New incident in state 1, plus its pending "created" journal entry."""
+    """New incident in state 1, plus its pending "created" journal entry.
+
+    number / opened_by: given by the GLPI sync (the ticket's RIC number and opener);
+    by default the next number of the sequence and the actor.
+    """
     _require_text(data.short_description, "Short description")
     _require_value(IncidentCategory, data.category, "Category")
     _require_value(ContactType, data.contact_type, "Contact type")
@@ -377,7 +391,7 @@ async def create_incident(
 
     incident = Incident(
         id=uuid.uuid4(),
-        number=await next_incident_number(session),
+        number=number or await next_incident_number(session),
         store_id=store_id,
         short_description=data.short_description.strip(),
         description=data.description,
@@ -389,7 +403,7 @@ async def create_incident(
         cmdb_ci_device_id=data.device_id,
         contact_type=data.contact_type,
         caller=data.caller,
-        opened_by=actor.actor,
+        opened_by=opened_by or actor.actor,
         impact=data.impact,
         urgency=data.urgency,
         state=IncidentState.NEW,
@@ -626,3 +640,227 @@ async def cancel_incident(
     )
     await _finish(session, commit)
     return incident
+
+
+# --- GLPI sync (Stage 2, Phase 16) ---------------------------------------------------
+# The sync (app/itsm/sync.py) changes incidents through these functions and the
+# ones above, so locks, rules, journal queue and audit rows stay in one place.
+
+# Fields copied from GLPI that update_incident does not cover.
+ITSM_DETAIL_FIELDS = (
+    "short_description",
+    "description",
+    "u_symptom",
+    "business_service",
+    "category",
+    "subcategory",
+    "contact_type",
+    "caller",
+    "opened_by",
+    "opened_at",
+    "cmdb_ci_network_element_id",
+    "cmdb_ci_device_id",
+)
+
+
+async def _check_ci_ids(
+    session: AsyncSession,
+    store_id: uuid.UUID,
+    network_element_id: uuid.UUID | None,
+    device_id: uuid.UUID | None,
+) -> None:
+    """Same rule as _check_ci: at most one main CI, of the incident's store."""
+    if network_element_id is not None and device_id is not None:
+        raise BusinessRuleError(
+            "An incident has at most one main CI: a network element or a device."
+        )
+    if network_element_id is not None:
+        found = await session.scalar(
+            select(NetworkElement.id).where(
+                NetworkElement.id == network_element_id, NetworkElement.store_id == store_id
+            )
+        )
+        if found is None:
+            raise NotFoundError("The network element was not found in this store.")
+    if device_id is not None:
+        found = await session.scalar(
+            select(Device.id).where(Device.id == device_id, Device.store_id == store_id)
+        )
+        if found is None:
+            raise NotFoundError("The device was not found in this store.")
+
+
+async def apply_itsm_details(
+    session: AsyncSession,
+    actor: ActorContext,
+    incident_id: uuid.UUID,
+    details: dict[str, Any],
+    now: datetime,
+    *,
+    itsm_updated_at: datetime,
+    glpi_ticket_id: int | None = None,
+    commit: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Copy descriptive fields from the ITSM and record the sync bookkeeping.
+
+    details: any of ITSM_DETAIL_FIELDS. Ignored for Closed / Canceled incidents
+    (final). itsm_updated_at only moves forward; last_synced_at = now. Returns
+    the changed details (also written as one audit row).
+    """
+    unknown = set(details) - set(ITSM_DETAIL_FIELDS)
+    if unknown:
+        raise BusinessRuleError(f"Fields {sorted(unknown)} cannot be set from the ITSM.")
+    incident = await lock_incident(session, incident_id)
+    changed: dict[str, dict[str, Any]] = {}
+    if details and incident.state not in FINAL_STATES:
+        values = dict(details)
+        if "short_description" in values:
+            values["short_description"] = _require_text(
+                values["short_description"], "Short description"
+            )
+        if "category" in values:
+            _require_value(IncidentCategory, values["category"], "Category")
+        if "contact_type" in values:
+            _require_value(ContactType, values["contact_type"], "Contact type")
+        element_id = values.get("cmdb_ci_network_element_id", incident.cmdb_ci_network_element_id)
+        device_id = values.get("cmdb_ci_device_id", incident.cmdb_ci_device_id)
+        await _check_ci_ids(session, incident.store_id, element_id, device_id)
+        opened_at = values.get("opened_at", incident.opened_at)
+        if incident.resolved_at is not None and opened_at > incident.resolved_at:
+            raise BusinessRuleError("The opening time cannot be after the resolution time.")
+        before = {name: getattr(incident, name) for name in values}
+        for name, value in values.items():
+            setattr(incident, name, value)
+        changed = diff(before, values)
+        if changed:
+            record_audit(
+                session,
+                actor,
+                action=AuditAction.UPDATE,
+                entity_type="incidents",
+                entity_id=incident.id,
+                store_id=incident.store_id,
+                changes=changed,
+            )
+    if glpi_ticket_id is not None:
+        incident.glpi_ticket_id = glpi_ticket_id
+    if incident.itsm_updated_at is None or itsm_updated_at > incident.itsm_updated_at:
+        incident.itsm_updated_at = itsm_updated_at
+    incident.last_synced_at = now
+    await _finish(session, commit)
+    return changed
+
+
+async def add_itsm_journal_entry(
+    session: AsyncSession,
+    actor: ActorContext,
+    incident_id: uuid.UUID,
+    *,
+    element: str,
+    value: str,
+    author_type: str,
+    created_by: str,
+    created_at: datetime,
+    glpi_followup_id: int,
+    skip: bool,
+    now: datetime,
+    commit: bool = True,
+) -> IncidentJournal:
+    """A work note or comment that already exists in the ITSM (one GLPI follow-up).
+
+    Keeps the ITSM author and time. Queued for the worker by the usual rule
+    (IT staff -> pending) unless skip=True (history, or RIC's own write).
+    Allowed on any state: the worker skips entries of closed incidents itself.
+    """
+    if element not in (JournalElement.WORK_NOTES, JournalElement.COMMENTS):
+        raise BusinessRuleError("Only work notes and comments can be added.")
+    text_value = _require_text(value, "The note")
+    incident = await lock_incident(session, incident_id)
+    status = JournalProcessStatus.SKIPPED if skip else journal_process_status(element, author_type)
+    entry = IncidentJournal(
+        id=uuid.uuid4(),
+        incident_id=incident.id,
+        element=element,
+        value=text_value,
+        author_type=author_type,
+        created_by=created_by,
+        source=_journal_source(actor),
+        process_status=str(status),
+        available_at=created_at,
+        processed_at=now if status == JournalProcessStatus.SKIPPED else None,
+        created_at=created_at,
+        glpi_followup_id=glpi_followup_id,
+    )
+    session.add(entry)
+    await session.flush()
+    record_audit(
+        session,
+        actor,
+        action=AuditAction.CREATE,
+        entity_type="incident_journal",
+        entity_id=entry.id,
+        store_id=incident.store_id,
+        changes={
+            "incident": incident.number,
+            "element": element,
+            "glpi_followup_id": glpi_followup_id,
+        },
+    )
+    await _finish(session, commit)
+    return entry
+
+
+async def update_itsm_journal_text(
+    session: AsyncSession,
+    actor: ActorContext,
+    entry_id: uuid.UUID,
+    value: str,
+    *,
+    commit: bool = True,
+) -> bool:
+    """A follow-up was edited in the ITSM: update the text, never process it again."""
+    text_value = _require_text(value, "The note")
+    entry = await session.get(IncidentJournal, entry_id, with_for_update=True)
+    if entry is None:
+        raise NotFoundError(f"Journal entry {entry_id} was not found.")
+    if entry.value == text_value:
+        return False
+    incident = await session.get(Incident, entry.incident_id)
+    before = entry.value
+    entry.value = text_value
+    record_audit(
+        session,
+        actor,
+        action=AuditAction.UPDATE,
+        entity_type="incident_journal",
+        entity_id=entry.id,
+        store_id=incident.store_id if incident else None,
+        changes={"value": {"old": before, "new": text_value}},
+    )
+    await _finish(session, commit)
+    return True
+
+
+async def skip_pending_entries(
+    session: AsyncSession,
+    entry_ids: list[uuid.UUID],
+    now: datetime,
+    *,
+    commit: bool = True,
+) -> int:
+    """Mark pending journal entries skipped (history imported by the first sync)."""
+    if not entry_ids:
+        return 0
+    rows = await session.scalars(
+        update(IncidentJournal)
+        .where(
+            IncidentJournal.id.in_(entry_ids),
+            IncidentJournal.process_status == JournalProcessStatus.PENDING,
+        )
+        .values(process_status=JournalProcessStatus.SKIPPED, processed_at=now)
+        .returning(IncidentJournal.id)
+        .execution_options(synchronize_session=False)
+    )
+    count = len(rows.all())
+    await _finish(session, commit)
+    return count
