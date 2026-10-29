@@ -14,7 +14,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
+from app.itsm.errors import ItsmConfigError, ItsmError
+from app.itsm.factory import build_itsm_client
 
 MIN_PG_VERSION_NUM = 130000
 results: list[tuple[bool, str]] = []
@@ -67,6 +69,22 @@ async def check_database(url: URL) -> None:
         await engine.dispose()
 
 
+async def check_itsm(settings: Settings) -> None:
+    """ITSM_PROVIDER=glpi: the GLPI settings are complete and both APIs accept them."""
+    try:
+        client = build_itsm_client(settings)
+    except ItsmConfigError as exc:
+        check(False, f"ITSM: {exc}")
+        return
+    try:
+        await client.check_connection()
+        check(True, f"GLPI: API V2 token and API V1 session as {settings.glpi_api_username}")
+    except ItsmError as exc:
+        check(False, f"GLPI: {exc.__class__.__name__}: {exc} (is the GLPI container running?)")
+    finally:
+        await client.aclose()
+
+
 async def main() -> int:
     check_python()
     check_timezones()
@@ -77,6 +95,7 @@ async def main() -> int:
 
     await check_database(main_url)
     await check_database(test_url)
+    await check_itsm(settings)
 
     failed = [label for ok, label in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")

@@ -402,3 +402,26 @@ The `servicenow_sys_id` columns are kept and are not used by the GLPI sync.
 - Every script lives in `scripts/`, runs as `uv run python -m scripts.<name>` from the repo root,
   and is safe to run more than once.
 - `.env` is never committed. `.env.example` is the template.
+
+## GLPI client (Phase 14)
+
+`app/itsm/` talks to GLPI 11 and turns its tickets into RIC values. It does not write
+to the database; the sync (later phases) uses it.
+
+| Module | Job |
+|---|---|
+| `glpi_client.py` | API V2 (OAuth2 password grant): ticket + team, timeline, changed-since search, add follow-up, write external id. API V1 (session) only where V2 has no equivalent: ETA (`time_to_resolve`), linked CI, pending reason, category parent, search by RIC number |
+| `snapshot.py` | One ticket as read from GLPI (GLPI terms, UTC times) |
+| `mapping.py` | Snapshot -> RIC values: state, hold reason, levels, category, contact type, "RIC details" fields, journal entries |
+| `timeparse.py` | GLPI date/time text <-> UTC (`GLPI_TIMEZONE`) |
+| `errors.py` | `ItsmUnavailable` (retry later), `ItsmRejected` (fix the cause), `ItsmNotFound` |
+| `factory.py` | `build_itsm_client(settings)`; lists missing settings |
+
+Settings: the ITSM section of `.env.example` (same names as `glpi-poc/.env.api`).
+GLPI must be running (Docker Desktop).
+
+```powershell
+uv run python -m scripts.check_env                    # includes the GLPI login check
+uv run python -m scripts.itsm_check                   # INC00001234 as RIC values (read-only)
+uv run python -m scripts.itsm_check --number INC00001238
+```

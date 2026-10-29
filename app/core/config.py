@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -82,6 +83,32 @@ class Settings(BaseSettings):
     # How often the running worker expires overdue store actions.
     worker_sweep_seconds: float = Field(default=60.0, ge=5, le=3600)
 
+    # --- ITSM / GLPI (Stage 2) ---------------------------------------------------------
+    # The ITSM of record. RIC reads its own database; GLPI changes reach it through
+    # webhooks and a reconciliation job. Values: see the ITSM section of .env.example.
+    itsm_provider: Literal["glpi"] = "glpi"
+    # High-level API V2 (OAuth2 password grant), e.g. http://localhost:8080/api.php/v2
+    glpi_v2_url: str | None = None
+    # e.g. http://localhost:8080/api.php/token
+    glpi_oauth_token_url: str | None = None
+    glpi_oauth_client_id: str | None = None
+    glpi_oauth_client_secret: SecretStr | None = None
+    glpi_api_username: str = "ric.api"
+    glpi_api_password: SecretStr | None = None
+    # Legacy REST API V1 (ETA, linked CI, pending reason), e.g. http://localhost:8080/apirest.php
+    glpi_v1_url: str | None = None
+    glpi_app_token: SecretStr | None = None
+    glpi_user_token: SecretStr | None = None
+    # Time zone of the date/time text GLPI V1 returns and V2 filters expect (Phase 12: UTC).
+    glpi_timezone: str = "UTC"
+    glpi_timeout_seconds: float = Field(default=30.0, ge=1, le=300)
+    # Shared secret of the GLPI webhooks (HMAC signature, used from Phase 17).
+    glpi_webhook_secret: SecretStr | None = None
+    # Reconciliation job: how often it asks GLPI what changed, and how far it looks back
+    # before its watermark (covers changes saved while the previous run was reading).
+    itsm_reconcile_interval_seconds: int = Field(default=900, ge=60, le=86400)
+    itsm_reconcile_overlap_seconds: int = Field(default=300, ge=0, le=3600)
+
     @field_validator("database_url")
     @classmethod
     def _require_asyncpg(cls, value: str) -> str:
@@ -100,6 +127,33 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_is_none(cls, value: str | None) -> str | None:
         return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("glpi_v2_url", "glpi_oauth_token_url", "glpi_oauth_client_id", "glpi_v1_url")
+    @classmethod
+    def _glpi_blank_is_none(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator(
+        "glpi_oauth_client_secret",
+        "glpi_api_password",
+        "glpi_app_token",
+        "glpi_user_token",
+        "glpi_webhook_secret",
+    )
+    @classmethod
+    def _glpi_blank_secret_is_none(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        return value
+
+    @field_validator("glpi_timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"GLPI_TIMEZONE {value!r} is not an IANA time zone") from exc
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:
