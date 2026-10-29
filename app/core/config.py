@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     itsm_webhook_max_age_seconds: int = Field(default=86400, ge=60, le=604800)
     itsm_webhook_max_future_seconds: int = Field(default=300, ge=0, le=3600)
     itsm_webhook_max_body_bytes: int = Field(default=1_000_000, ge=1024, le=10_000_000)
+    # ITSM sync in the worker (Phase 18): how often the inbox loop looks for due rows,
+    # how many attempts a row gets, the seconds to wait before attempt 2, 3, ...
+    # (comma-separated; the last value repeats), how often the scheduler checks for due
+    # jobs, and how long finished (done / ignored) inbox rows are kept.
+    itsm_sync_poll_seconds: float = Field(default=5.0, ge=0.5, le=300)
+    itsm_sync_max_attempts: int = Field(default=8, ge=1, le=50)
+    itsm_sync_retry_delays_seconds: str = "30,120,600,1800"
+    itsm_scheduler_poll_seconds: float = Field(default=10.0, ge=1, le=300)
+    itsm_inbox_retention_days: int = Field(default=14, ge=1, le=365)
 
     @field_validator("database_url")
     @classmethod

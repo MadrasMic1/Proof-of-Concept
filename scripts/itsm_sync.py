@@ -5,6 +5,7 @@
     uv run python -m scripts.itsm_sync --number INC00001234    one incident
     uv run python -m scripts.itsm_sync --pending               process the itsm_inbox queue
     uv run python -m scripts.itsm_sync --pending --limit 5
+    uv run python -m scripts.itsm_sync --reconcile             the 15-minute check, once, now
 
 --pending takes due inbox rows one by one: done / ignored / conflict, or failed on
 an error. If GLPI is unavailable the row goes back to pending (retried later) and
@@ -29,6 +30,7 @@ from app.itsm import inbox
 from app.itsm.errors import ItsmConfigError, ItsmUnavailable
 from app.itsm.factory import build_itsm_client
 from app.itsm.sync import Outcome, SyncResult, sync_ticket
+from app.itsm.worker import ItsmWorker, ItsmWorkerConfig
 from app.models import Incident
 
 RETRY_AFTER = timedelta(minutes=1)
@@ -46,6 +48,9 @@ async def main() -> int:
     target.add_argument("--ticket", type=int, help="GLPI ticket id")
     target.add_argument("--number", help="RIC incident number, e.g. INC00001234")
     target.add_argument("--pending", action="store_true", help="process the itsm_inbox queue")
+    target.add_argument(
+        "--reconcile", action="store_true", help="run the 15-minute reconciliation once, now"
+    )
     parser.add_argument("--limit", type=int, default=0, help="--pending: at most N rows (0 = all)")
     args = parser.parse_args()
     settings = get_settings()
@@ -59,6 +64,11 @@ async def main() -> int:
     factory = create_session_factory(engine)
     failed = 0
     try:
+        if args.reconcile:
+            worker = ItsmWorker(factory, client, clock, ItsmWorkerConfig.from_settings(settings))
+            reconciled = await worker.reconcile(force=True)
+            print(reconciled.summary() if reconciled else "[SKIPPED] another worker is running it")
+            return 0 if reconciled is None or reconciled.ok or reconciled.skipped else 1
         if not args.pending:
             ticket_id = args.ticket
             if args.number:

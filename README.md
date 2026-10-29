@@ -505,3 +505,27 @@ uv run python -m scripts.itsm_webhooks --disable
 ```
 
 `ITSM_WEBHOOK_BASE_URL` (default `http://host.docker.internal:8000`) is the API as GLPI reaches it.
+
+## GLPI sync in the worker (Phase 18)
+
+With GLPI configured, `scripts.worker` runs three loops in one process:
+
+| Loop | Does |
+|---|---|
+| journal (unchanged) | pending journal entries -> LLM -> alerts, actions, notifications |
+| ITSM inbox | due `itsm_inbox` rows -> `sync_ticket` (fresh GLPI snapshot). GLPI unavailable: retry after 30 s, 2 min, 10 min, 30 min..., the loop pauses; GLPI rejected: failed; at most 8 attempts |
+| scheduler | `itsm_reconcile` every 15 min: GLPI tickets changed after (watermark - 5 min) -> inbox; watermark = newest GLPI `date_mod`, moved only on success. Hourly: deletes done / ignored inbox rows older than 14 days |
+
+The loops pass work through tables only, so one never blocks the others. The reconciliation
+catches what webhooks cannot: reassignments, deliveries GLPI gave up on, changes while the
+API was down. It needs the watermark set by `scripts.itsm_link`.
+
+```powershell
+uv run python -m scripts.worker                 # all loops (GLPI sync on when configured)
+uv run python -m scripts.worker --drain         # inbox first, then the journal, then stop
+uv run python -m scripts.worker --no-itsm       # journal only
+uv run python -m scripts.itsm_sync --reconcile  # the 15-minute check, once, now
+```
+
+`scripts.demo` stays offline (it reseeds incidents without GLPI links). With GLPI:
+`scripts.seed itsm` -> `scripts.itsm_link` -> `scripts.worker`.
