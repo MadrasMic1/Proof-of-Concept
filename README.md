@@ -425,3 +425,30 @@ uv run python -m scripts.check_env                    # includes the GLPI login 
 uv run python -m scripts.itsm_check                   # INC00001234 as RIC values (read-only)
 uv run python -m scripts.itsm_check --number INC00001238
 ```
+
+## Linking RIC to GLPI (Phase 15)
+
+`scripts.itsm_link` finds, for every RIC row, the GLPI object that already exists for it and
+stores its GLPI id. It creates nothing in GLPI and copies no incident content (the sync does).
+
+| RIC row | GLPI object | Match |
+|---|---|---|
+| store | Location | name starts with `<site_code> - ` |
+| assignment group | Group | same name |
+| network element / device | NetworkEquipment, Computer, Printer, Peripheral | same name at the store's location |
+| incident | Ticket | `external_id` = RIC number |
+| journal entry | follow-up of that ticket | same kind (work note = private, comment = public) and text |
+
+Then it queues one `itsm_inbox` row (source `link`) per incident ticket at a RIC store (its
+first sync) and sets the `itsm_reconcile` watermark to the newest GLPI `date_mod`.
+A match must be unique on both sides; anything else is reported and left unchanged; existing
+links change only with `--relink`. Safe to run more than once.
+
+```powershell
+uv run python -m scripts.itsm_link --dry-run   # report only
+uv run python -m scripts.itsm_link             # link, queue first syncs, set watermark
+uv run python -m scripts.itsm_link --relink    # also move links that point elsewhere
+```
+
+Reseeding: `scripts.seed master` / `inventory` keep the links. `scripts.seed itsm` recreates
+incidents and journal entries without them: run `scripts.itsm_link` again afterwards.

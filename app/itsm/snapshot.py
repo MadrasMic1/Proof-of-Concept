@@ -85,3 +85,36 @@ class ChangedTicket:
 
     id: int
     date_mod: datetime
+
+
+# --- lists for linking (Phase 15) ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GlpiNamed:
+    """A GLPI Location or Group: id and name (HTML entities decoded)."""
+
+    id: int
+    name: str
+
+
+@dataclass(frozen=True)
+class GlpiAsset:
+    """A GLPI asset (NetworkEquipment, Computer, Printer, Peripheral) and its location."""
+
+    itemtype: str
+    id: int
+    name: str
+    location_id: int | None
+
+
+@dataclass(frozen=True)
+class GlpiTicketRef:
+    """One ticket from the V1 ticket list: enough to link and queue it."""
+
+    id: int
+    external_id: str | None
+    location_id: int | None
+    type: int
+    date_mod: datetime | None
+    is_deleted: bool

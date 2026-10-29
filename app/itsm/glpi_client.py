@@ -32,6 +32,9 @@ from app.itsm.errors import ItsmNotFound, ItsmRejected, ItsmUnavailable
 from app.itsm.snapshot import (
     ChangedTicket,
     FollowupSnapshot,
+    GlpiAsset,
+    GlpiNamed,
+    GlpiTicketRef,
     LinkedItem,
     SolutionSnapshot,
     TeamMember,
@@ -48,6 +51,8 @@ DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
 CHANGED_PAGE_SIZE = 100
 MAX_CHANGED_PAGES = 100
 V1_RANGE = "0-999"
+V1_PAGE_SIZE = 1000
+ASSET_ITEMTYPES = ("NetworkEquipment", "Computer", "Printer", "Peripheral")
 _ERROR_EXCERPT = 300
 # GLPI actor types (CommonITILActor): 1 requester, 2 assigned, 3 observer.
 _ROLE_BY_NUMBER = {1: "requester", 2: "assigned", 3: "observer"}
@@ -490,6 +495,79 @@ class GlpiClient:
     async def set_external_id(self, ticket_id: int, number: str) -> None:
         """Write the RIC incident number into the ticket's external_id."""
         await self._v2("PATCH", f"Assistance/Ticket/{ticket_id}", json={"external_id": number})
+
+    # --- lists for linking (Phase 15) ----------------------------------------------
+
+    async def _v1_list(self, itemtype: str) -> list[dict[str, Any]]:
+        """Every non-deleted item of one V1 itemtype, V1_PAGE_SIZE per call."""
+        items: list[dict[str, Any]] = []
+        start = 0
+        while True:
+            params = {"range": f"{start}-{start + V1_PAGE_SIZE - 1}"}
+            try:
+                page = _items(await self._v1_json(itemtype, params))
+            except ItsmRejected as exc:
+                # GLPI answers 400 ERROR_RANGE_EXCEED_TOTAL when start is past the end.
+                if "ERROR_RANGE_EXCEED_TOTAL" in exc.message:
+                    break
+                raise
+            items.extend(page)
+            if len(page) < V1_PAGE_SIZE:
+                break
+            start += V1_PAGE_SIZE
+        return items
+
+    async def _named(self, itemtype: str) -> list[GlpiNamed]:
+        result = []
+        for item in await self._v1_list(itemtype):
+            item_id, name = _ref_id(item.get("id")), _ref_name(item.get("name"))
+            if item_id is not None and name is not None:
+                result.append(GlpiNamed(id=item_id, name=name))
+        return result
+
+    async def list_locations(self) -> list[GlpiNamed]:
+        return await self._named("Location")
+
+    async def list_groups(self) -> list[GlpiNamed]:
+        return await self._named("Group")
+
+    async def list_assets(self) -> list[GlpiAsset]:
+        """Assets of every type RIC links (NetworkEquipment, Computer, Printer, Peripheral)."""
+        assets = []
+        for itemtype in ASSET_ITEMTYPES:
+            for item in await self._v1_list(itemtype):
+                item_id, name = _ref_id(item.get("id")), _ref_name(item.get("name"))
+                if item_id is None or name is None:
+                    continue
+                assets.append(
+                    GlpiAsset(
+                        itemtype=itemtype,
+                        id=item_id,
+                        name=name,
+                        location_id=_ref_id(item.get("locations_id")),
+                    )
+                )
+        return assets
+
+    async def list_tickets(self) -> list[GlpiTicketRef]:
+        """Every non-deleted ticket (all types): id, RIC number, location, type, date_mod."""
+        tickets = []
+        for item in await self._v1_list("Ticket"):
+            ticket_id = _ref_id(item.get("id"))
+            if ticket_id is None:
+                continue
+            external_id = html.unescape(str(item.get("externalid") or "")).strip()
+            tickets.append(
+                GlpiTicketRef(
+                    id=ticket_id,
+                    external_id=external_id or None,
+                    location_id=_ref_id(item.get("locations_id")),
+                    type=_int(item.get("type")),
+                    date_mod=parse_glpi_time(item.get("date_mod"), self.tz),
+                    is_deleted=bool(_int(item.get("is_deleted"))),
+                )
+            )
+        return tickets
 
     async def aclose(self) -> None:
         try:
