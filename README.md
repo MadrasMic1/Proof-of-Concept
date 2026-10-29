@@ -529,3 +529,24 @@ uv run python -m scripts.itsm_sync --reconcile  # the 15-minute check, once, now
 
 `scripts.demo` stays offline (it reseeds incidents without GLPI links). With GLPI:
 `scripts.seed itsm` -> `scripts.itsm_link` -> `scripts.worker`.
+
+## Store replies posted to GLPI (Phase 19)
+
+`POST /api/v1/actions/{actionId}/responses` for an incident linked to GLPI posts the reply to the
+GLPI ticket FIRST, as a public follow-up by the integration user:
+
+    [Store 01234 - priya.store-manager] Store reply to "Is Printer 02 printing now?": Yes.
+
+Only after GLPI accepted it is the reply recorded in RIC (as before), with the follow-up's
+`glpi_followup_id` on the store comment, so GLPI's webhook for it changes nothing.
+
+| Case | Answer |
+|---|---|
+| same `clientRequestId` again | 200, the earlier reply; nothing posted again |
+| invalid / answered / closed / expired (checked before GLPI) | 422 / 409, nothing posted |
+| GLPI unavailable | 503 `itsm_unavailable`, nothing recorded (retry with the same id) |
+| GLPI refused | 502 `itsm_rejected`, nothing recorded |
+| ticket deleted in GLPI | 409 |
+| incident not linked to GLPI | recorded in RIC only, as before |
+
+The API creates one GLPI client at startup; incomplete GLPI settings never stop the API.

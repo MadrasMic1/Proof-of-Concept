@@ -31,6 +31,9 @@ from app.core.logging import configure_logging
 from app.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.core.request_log import CLIENT_APP_HEADER
 from app.db.session import create_engine_from_settings, create_session_factory
+from app.itsm.errors import ItsmConfigError
+from app.itsm.factory import build_itsm_client
+from app.itsm.glpi_client import GlpiClient
 
 STARTUP_DB_CHECK_SECONDS = 3.0
 
@@ -54,6 +57,17 @@ async def _log_database_status(engine: AsyncEngine) -> None:
         logger.info("database reachable", extra={"database": database})
 
 
+def _itsm_client(settings: Settings) -> GlpiClient | None:
+    """One GLPI client per API process (store replies are posted to GLPI, Phase 19).
+    Incomplete GLPI settings never stop startup: replies to linked incidents then
+    answer 503, replies to unlinked incidents are recorded locally as before."""
+    try:
+        return build_itsm_client(settings)
+    except ItsmConfigError as exc:
+        logger.warning("GLPI client not configured", extra={"error": str(exc)})
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -62,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine_from_settings(settings)
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
+    app.state.itsm_client = _itsm_client(settings)
     await _log_database_status(engine)
     logger.info(
         "application started",
@@ -70,6 +85,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if app.state.itsm_client is not None:
+            await app.state.itsm_client.aclose()
         await engine.dispose()
         logger.info("application stopped")
 

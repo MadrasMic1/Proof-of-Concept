@@ -56,6 +56,20 @@ class BusinessRuleError(AppError):
     code = "business_rule"
 
 
+class BadGatewayError(AppError):
+    """Another system (e.g. the ITSM) refused a request RIC made for the client."""
+
+    status_code = 502
+    code = "bad_gateway"
+
+
+class ServiceUnavailableError(AppError):
+    """Another system (e.g. the ITSM) did not answer: the client may try again."""
+
+    status_code = 503
+    code = "service_unavailable"
+
+
 _HTTP_CODES = {
     400: "bad_request",
     401: "unauthorized",

@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.actor import ActorContext
 from app.core.errors import BusinessRuleError, ConflictError, NotFoundError
-from app.models import StoreAction, StoreActionResponse
+from app.models import Incident, StoreAction, StoreActionResponse
 from app.models.values import (
     ActionStatus,
     ActorType,
@@ -70,6 +70,61 @@ def _source(actor: ActorContext) -> str:
         raise BusinessRuleError(f"Replies cannot come from {actor.source!r}.") from exc
 
 
+@dataclass(frozen=True)
+class ReplyPlan:
+    """What respond_to_action will do, checked BEFORE the reply is sent to the ITSM."""
+
+    repeated: bool  # same clientRequestId as an earlier reply: nothing to send
+    glpi_ticket_id: int | None  # the incident's GLPI ticket; None = not linked
+    text: str | None  # the store comment respond_to_action will write
+
+
+async def prepare_reply(
+    session: AsyncSession,
+    actor: ActorContext,
+    store_id: uuid.UUID,
+    action_id: uuid.UUID,
+    reply: NewReply,
+    now: datetime,
+) -> ReplyPlan:
+    """The checks of respond_to_action, read-only and without locks (Phase 19).
+
+    The route runs this first, so a reply that would be refused (404 / 409 / 422) is
+    never posted to GLPI, and no lock is held while GLPI answers. respond_to_action
+    checks everything again under its locks.
+    """
+    _source(actor)
+    row = (
+        await session.execute(
+            select(StoreAction, Incident.glpi_ticket_id)
+            .join(Incident, Incident.id == StoreAction.incident_id)
+            .where(StoreAction.id == action_id, StoreAction.store_id == store_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFoundError(f"Action {action_id} was not found.")
+    action, glpi_ticket_id = row
+    if reply.client_request_id is not None:
+        earlier_action = await session.scalar(
+            select(StoreActionResponse.action_id).where(
+                StoreActionResponse.client_request_id == reply.client_request_id
+            )
+        )
+        if earlier_action is not None:
+            if earlier_action != action.id:
+                raise ConflictError("That request ID was already used for another action.")
+            return ReplyPlan(repeated=True, glpi_ticket_id=glpi_ticket_id, text=None)
+    if action.status == ActionStatus.RESPONDED:
+        raise ConflictError("This action has already been answered.")
+    if action.status != ActionStatus.OPEN:
+        raise ConflictError("This action is closed.")
+    if action.due_by is not None and action.due_by <= now:
+        raise ConflictError("This action has expired.")
+    valid = validate_reply(action.expected_response, reply.answer_yes_no, reply.response_text)
+    text = journal_text(action.title, action.expected_response, valid)
+    return ReplyPlan(repeated=False, glpi_ticket_id=glpi_ticket_id, text=text)
+
+
 async def respond_to_action(
     session: AsyncSession,
     actor: ActorContext,
@@ -79,6 +134,7 @@ async def respond_to_action(
     now: datetime,
     *,
     commit: bool = True,
+    glpi_followup_id: int | None = None,
 ) -> ActionReply:
     source = _source(actor)
     incident_id = await session.scalar(
@@ -125,6 +181,9 @@ async def respond_to_action(
         now,
         commit=False,
     )
+    if glpi_followup_id is not None:
+        # Already posted to GLPI (Phase 19): the sync recognises the follow-up by this id.
+        entry.glpi_followup_id = glpi_followup_id
     response = StoreActionResponse(
         id=uuid.uuid4(),
         action_id=action.id,

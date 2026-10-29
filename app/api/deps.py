@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import Clock
 from app.core.config import Settings
+from app.itsm.glpi_client import GlpiClient
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -44,3 +45,11 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 ClockDep = Annotated[Clock, Depends(get_clock)]
+
+
+def get_itsm_client(request: Request) -> GlpiClient | None:
+    """The GLPI client created at startup; None when the GLPI settings are incomplete."""
+    return getattr(request.app.state, "itsm_client", None)
+
+
+ItsmClientDep = Annotated[GlpiClient | None, Depends(get_itsm_client)]
