@@ -569,6 +569,38 @@ class GlpiClient:
             )
         return tickets
 
+    # --- GLPI webhooks (Phase 17) ---------------------------------------------------
+
+    async def _v1_write(self, method: str, path: str, body: dict[str, Any]) -> Any:
+        """A V1 POST / PUT with the session token (renewed once on 401)."""
+        url = f"{self.config.v1_url.rstrip('/')}/{path.lstrip('/')}"
+        what = f"GLPI V1 {method} {path}"
+        session = await self._v1_session()
+        for attempt in range(2):
+            headers = self._v1_headers()
+            headers["Session-Token"] = session
+            response = await self._send(method, url, what, json=body, headers=headers)
+            if response.status_code == 401 and attempt == 0:
+                session = await self._v1_session(stale=session)
+                continue
+            return self._json(self._check(response, what), what)
+        raise AssertionError("unreachable")
+
+    async def list_webhooks(self) -> list[dict[str, Any]]:
+        """Every GLPI webhook (V1 fields: id, name, itemtype, event, url, is_active, ...)."""
+        return await self._v1_list("Webhook")
+
+    async def add_webhook(self, fields: dict[str, Any]) -> int:
+        payload = await self._v1_write("POST", "Webhook", {"input": fields})
+        entry = payload[0] if isinstance(payload, list) and payload else payload
+        webhook_id = _ref_id(entry.get("id")) if isinstance(entry, dict) else None
+        if webhook_id is None:
+            raise ItsmRejected("GLPI V1 POST Webhook: no id in the answer")
+        return webhook_id
+
+    async def update_webhook(self, webhook_id: int, fields: dict[str, Any]) -> None:
+        await self._v1_write("PUT", f"Webhook/{webhook_id}", {"input": fields})
+
     async def aclose(self) -> None:
         try:
             if self._session is not None:

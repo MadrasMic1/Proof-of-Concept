@@ -478,3 +478,30 @@ uv run python -m scripts.itsm_sync --pending              # process the inbox qu
 uv run python -m scripts.itsm_sync --number INC00001234   # one incident
 uv run python -m scripts.itsm_sync --ticket 3             # one GLPI ticket
 ```
+
+## GLPI webhooks (Phase 17)
+
+GLPI calls `POST /api/v1/integrations/glpi/webhooks/{itemtype}/{event}` when a ticket is
+created or updated, or a follow-up or solution is added. The route answers 202 in
+milliseconds: it only records the ticket in `itsm_inbox` (one pending row per ticket;
+deliveries that arrive together are merged, each keeping its full GLPI payload). The sync
+(`scripts.itsm_sync --pending`, the worker from Phase 18) reads a fresh snapshot from GLPI.
+
+| Check | Result |
+|---|---|
+| `X-GLPI-Signature` = HMAC-SHA256(`GLPI_WEBHOOK_SECRET`, body + `X-GLPI-Timestamp`) | else 401 |
+| timestamp at most 24 h old, at most 5 min ahead (GLPI stamps when it queues) | else 401 |
+| body at most 1 MB | else 413 |
+| secret not configured | 503 |
+| unknown type, Change/Problem follow-up, no ticket id, not JSON | 202 `accepted: false` (logged) |
+
+No `X-Site-Id`: GLPI is not a store. The API must listen on all interfaces for GLPI (Docker):
+
+```powershell
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run python -m scripts.itsm_webhooks            # create / update the 4 GLPI webhooks
+uv run python -m scripts.itsm_webhooks --status
+uv run python -m scripts.itsm_webhooks --disable
+```
+
+`ITSM_WEBHOOK_BASE_URL` (default `http://host.docker.internal:8000`) is the API as GLPI reaches it.

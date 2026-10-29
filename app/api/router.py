@@ -15,6 +15,7 @@ from app.api.routes import (
     appointments,
     devices,
     incidents,
+    integrations,
     network,
     notifications,
     portal_notifications,
@@ -33,3 +34,4 @@ api_router.include_router(alerts.router)
 api_router.include_router(actions.router)
 api_router.include_router(notifications.router)
 api_router.include_router(portal_notifications.router)
+api_router.include_router(integrations.router)

@@ -108,6 +108,14 @@ class Settings(BaseSettings):
     # before its watermark (covers changes saved while the previous run was reading).
     itsm_reconcile_interval_seconds: int = Field(default=900, ge=60, le=86400)
     itsm_reconcile_overlap_seconds: int = Field(default=300, ge=0, le=3600)
+    # GLPI webhooks into RIC (Phase 17): the address GLPI uses to reach this API (from the
+    # GLPI container: host.docker.internal), how old and how far in the future a delivery's
+    # timestamp may be (GLPI stamps it when it QUEUES the delivery; retries arrive late),
+    # and the largest body accepted.
+    itsm_webhook_base_url: str = "http://host.docker.internal:8000"
+    itsm_webhook_max_age_seconds: int = Field(default=86400, ge=60, le=604800)
+    itsm_webhook_max_future_seconds: int = Field(default=300, ge=0, le=3600)
+    itsm_webhook_max_body_bytes: int = Field(default=1_000_000, ge=1024, le=10_000_000)
 
     @field_validator("database_url")
     @classmethod
