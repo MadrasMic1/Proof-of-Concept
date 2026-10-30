@@ -550,3 +550,495 @@ Only after GLPI accepted it is the reply recorded in RIC (as before), with the f
 | incident not linked to GLPI | recorded in RIC only, as before |
 
 The API creates one GLPI client at startup; incomplete GLPI settings never stop the API.
+
+## GLPI integration: operations (Phase 20)
+
+### What runs
+
+| Process | Command | Does |
+|---|---|---|
+| PostgreSQL | (service) | RIC database |
+| GLPI + MySQL | `docker compose up -d` (GLPI folder) | the ITSM; its own cron sends the webhooks every minute |
+| RIC API | `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000` | mobile + portal routes, GLPI webhooks in, store replies out to GLPI |
+| RIC worker | `uv run python -m scripts.worker` | three loops: journal (LLM), ITSM inbox (sync GLPI tickets), scheduler (15-minute reconciliation, inbox clean-up) |
+
+Start order: PostgreSQL and GLPI, then the API, then the worker. `--host 0.0.0.0` is needed
+because GLPI calls the API from Docker (`ITSM_WEBHOOK_BASE_URL`, default
+`http://host.docker.internal:8000`).
+
+### Is the sync healthy?
+
+```powershell
+uv run python -m scripts.itsm_status          # from the database (exit code 1 on FAIL)
+uv run python -m scripts.itsm_status --live   # plus GLPI logins and clock drift
+```
+
+The same report as JSON: `GET /api/v1/admin/itsm/status` (no `X-Site-Id`).
+
+| Message | Meaning | Fix |
+|---|---|---|
+| reconcile FAIL "never set up" / "no watermark" | the 15-minute check has no starting point | `scripts.itsm_link`; with no ticket in GLPI yet: `scripts.itsm_resync --start-watermark` |
+| reconcile WARN "last successful run ..." | the worker is not running | start `scripts.worker` |
+| reconcile FAIL "N failed runs in a row" | GLPI unreachable or login refused | `scripts.itsm_status --live`, check Docker / `.env` |
+| inbox WARN "oldest received ..." | rows wait: worker stopped or GLPI down | start the worker / GLPI |
+| inbox WARN "'processing' for over 30 min" | a worker stopped in the middle | restart the worker (it releases them) |
+| inbox WARN "failed row(s)" | a sync was refused (e.g. bad token) | fix the cause, then `scripts.itsm_resync --retry-failed` |
+| inbox WARN "conflict(s)" | GLPI reopened / changed a finished incident (RIC never reopens) | review: `scripts.itsm_resync --list-conflicts` |
+| links FAIL "no store is linked" | `itsm_link` never ran (or after a schema reset) | `scripts.itsm_link` |
+| links INFO "... have no GLPI ticket" | incidents that exist only in RIC (e.g. reseeded) | `scripts.itsm_link` if they exist in GLPI |
+| clock WARN / FAIL | Docker VM clock drifted (after sleep) | restart Docker Desktop (or `wsl --shutdown`) |
+| webhooks INFO "no webhook received yet" | GLPI webhooks not set up / not reaching the API | `scripts.itsm_webhooks --status`; GLPI log `/var/glpi/logs/webhook.log` ("is unsafe" = URL allowlist not loaded) |
+
+### Recovery (only queues work; the worker syncs)
+
+```powershell
+uv run python -m scripts.itsm_resync --number INC00001234   # one incident
+uv run python -m scripts.itsm_resync --ticket 3             # one GLPI ticket
+uv run python -m scripts.itsm_resync --all --quiet          # everything linked; history not sent to the LLM
+uv run python -m scripts.itsm_resync --retry-failed         # failed rows again
+uv run python -m scripts.itsm_resync --list-conflicts
+uv run python -m scripts.itsm_resync --start-watermark      # reconciliation starts at GLPI's current time
+uv run python -m scripts.itsm_sync --reconcile              # the 15-minute check now
+```
+
+| Situation | Steps |
+|---|---|
+| reseeded incidents (`scripts.seed itsm`) | `scripts.itsm_link`, then the worker syncs the queued rows quietly |
+| GLPI restored from a backup | `scripts.itsm_link`, `scripts.itsm_resync --all --quiet` |
+| new webhook secret | change `GLPI_WEBHOOK_SECRET` in `.env`, restart the API, `scripts.itsm_webhooks` |
+| GLPI was down for hours | nothing: retries and the 15-minute check catch up; `scripts.itsm_status` to confirm |
+
+### End-to-end check before a demo (API + worker running)
+
+| # | Do | Expect |
+|---|---|---|
+| 1 | GLPI: new ticket at location `01234 - ...`, category Network > WAN, group Network Ops | within ~1 min a new INC incident at store 01234 (number written to the GLPI external id); an alert for the store |
+| 2 | GLPI: private follow-up "Store please restart the router and confirm." | store action + "Action Required" notification |
+| 3 | App / Swagger: reply to that action | public follow-up `[Store 01234 - ...]` in the GLPI timeline; no new journal entry after its webhook |
+| 4 | GLPI: change only the assigned group (no webhook) | `scripts.itsm_sync --reconcile` brings it over |
+| 5 | Stop the API, add a follow-up in GLPI, start the API | the 15-minute check (or `--reconcile`) brings it over |
+| 6 | GLPI: add a solution (Solved (Permanently)) | incident resolved, alert closed, "is it fixed?" action |
+| 7 | GLPI: close the ticket | incident closed, actions closed, visits cancelled |
+| 8 | GLPI: reopen it | `scripts.itsm_status` shows a conflict |
+
+## Running RIC with GLPI on a new machine
+
+For a colleague who has **PostgreSQL** and **Docker Desktop** but no GLPI yet. Everything below
+runs RIC end to end: GLPI in Docker, the RIC API, the worker. Commands are for Windows
+PowerShell (on macOS / Linux use the same commands in a terminal; paths differ).
+
+You will create a few files **outside this repository** (in `C:\ric-glpi`); their full content
+is in this section. Nothing in the repository needs to change.
+
+### 1. Prerequisites
+
+- Git, and `uv` (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`,
+  or `pip install uv` where install scripts are blocked)
+- PostgreSQL 13+ running, with the `postgres` superuser password at hand
+- Docker Desktop running (`docker version` answers)
+- Ports free: 8000 (RIC API), 8080 (GLPI), 5432 (PostgreSQL)
+
+### 2. RIC backend without GLPI
+
+```powershell
+git clone <repo-url> ric-backend; cd ric-backend
+uv python install 3.12
+uv sync
+Copy-Item .env.example .env
+```
+
+Edit `.env`: `DATABASE_URL` (password of the `ric_app` user the next command creates),
+`ADMIN_DATABASE_URL` (your `postgres` password), and the LLM: `LLM_PROVIDER=fake` works with
+no key (placeholder texts); `LLM_PROVIDER=nvidia` + `LLM_API_KEY=nvapi-...` for real texts.
+Leave the ITSM section for step 5.
+
+```powershell
+uv run python -m scripts.db_bootstrap       # role ric_app, databases ric_poc + ric_poc_test
+uv run alembic upgrade head                 # all tables
+uv run python -m scripts.db_status          # status OK
+uv run python -m scripts.seed all           # 10 stores, inventory, demo incidents
+uv run pytest -q                            # optional: every test passes without GLPI
+uv run python -m scripts.check_env          # all OK except the GLPI line (until step 5)
+```
+
+### 3. GLPI in Docker
+
+Create the folder `C:\ric-glpi` and these three files in it.
+
+`C:\ric-glpi\docker-compose.yml`:
+
+```yaml
+name: ric-glpi
+services:
+  glpi:
+    image: glpi/glpi:11.0.11
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - db
+    ports:
+      - "8080:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - glpi_data:/var/glpi
+      - ./local_define.php:/var/www/glpi/config/local_define.php:ro
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+      MYSQL_DATABASE: ${GLPI_DB_NAME}
+      MYSQL_USER: ${GLPI_DB_USER}
+      MYSQL_PASSWORD: ${GLPI_DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+volumes:
+  glpi_data:
+  db_data:
+```
+
+`C:\ric-glpi\.env` (choose your own password; keep this file private):
+
+```text
+GLPI_DB_HOST=db
+GLPI_DB_PORT=3306
+GLPI_DB_NAME=glpi
+GLPI_DB_USER=glpi
+GLPI_DB_PASSWORD=change-me-glpi-db
+```
+
+`C:\ric-glpi\local_define.php` (lets GLPI send webhooks to the RIC API on this machine; GLPI
+11 refuses webhook URLs with a port unless they are allowed here):
+
+```php
+<?php
+define('GLPI_SERVERSIDE_URL_ALLOWLIST', [
+    '/^(https?|feed):\/\/[^@:]+(\/.*)?$/',
+    '/^https?:\/\/host\.docker\.internal(:\d+)?(\/.*)?$/',
+]);
+```
+
+Start it (the first start installs GLPI; wait until the log is quiet, 1-3 minutes):
+
+```powershell
+cd C:\ric-glpi
+docker compose up -d
+docker compose logs -f glpi       # Ctrl+C when the installation has finished
+docker compose ps                 # glpi and db: running
+```
+
+Open http://localhost:8080 and log in as `glpi` / `glpi`. Change that password
+(top right > My settings). Delete or deactivate the other default users (`tech`, `normal`,
+`post-only`) under Administration > Users if you like.
+
+### 4. Configure GLPI (in the browser, as glpi)
+
+1. **API** - Setup > General > tab **API**: set *Enable API*, *Enable legacy API* (REST API),
+   *Enable login with credentials* and *Enable login with external token* to **Yes**. Save.
+2. **API client** - same tab, *Add API client*: name `ric-backend`, Active **Yes**, leave the
+   IPv4 / IPv6 ranges **empty** (RIC's calls arrive through Docker, not from 127.0.0.1),
+   *Regenerate* the application token, Save. Copy the **Application token** (`GLPI_APP_TOKEN`).
+3. **Integration user** - Administration > Users > Add: login `ric.api`, a password
+   (`GLPI_API_PASSWORD`), profile **Super-Admin**, entity **Root entity**, recursive **Yes**.
+   Save, open `ric.api` again, section *Remote access keys*: tick *Regenerate* next to
+   **API token**, Save, copy the token (`GLPI_USER_TOKEN`).
+4. **OAuth client** (API V2) - Setup > OAuth clients > Add: name `ric-backend`, Grants
+   **Password**, Scopes **api**. Save, copy **Client ID** and **Client secret**.
+5. **Webhook sender** - Setup > Automatic actions > `queuedwebhook`: Status *Scheduled*,
+   run mode *CLI*, frequency *1 minute* (the defaults of the Docker image; change if not).
+
+### 5. Connect RIC to GLPI
+
+Generate a webhook secret:
+
+```powershell
+uv run python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+In `ric-backend\.env`, fill the ITSM section (names as in `.env.example`):
+
+```text
+ITSM_PROVIDER=glpi
+GLPI_V2_URL=http://localhost:8080/api.php/v2
+GLPI_OAUTH_TOKEN_URL=http://localhost:8080/api.php/token
+GLPI_OAUTH_CLIENT_ID=<Client ID from 4.4>
+GLPI_OAUTH_CLIENT_SECRET=<Client secret from 4.4>
+GLPI_API_USERNAME=ric.api
+GLPI_API_PASSWORD=<password from 4.3>
+GLPI_V1_URL=http://localhost:8080/apirest.php
+GLPI_APP_TOKEN=<Application token from 4.2>
+GLPI_USER_TOKEN=<API token from 4.3>
+GLPI_WEBHOOK_SECRET=<the generated secret>
+```
+
+Keep the other ITSM lines of `.env.example` as they are. Then:
+
+```powershell
+uv run python -m scripts.check_env    # now also: [OK] GLPI: API V2 token and API V1 session as ric.api
+```
+
+**GLPI reference data.** RIC matches GLPI locations, groups, categories, request sources,
+pending reasons and solution types by name. Create `C:\ric-glpi\glpi_bootstrap.py` with this
+content (it reads the stores and groups from your RIC database and creates what is missing in
+GLPI; safe to run again):
+
+```python
+"""Create the GLPI reference data RIC expects (run from the ric-backend folder).
+
+Locations "<site code> - <store name>" for every RIC store, a group for every RIC
+assignment group, the ITIL categories, request sources, pending reasons and solution
+types RIC maps. Uses the GLPI_* values of ric-backend/.env (API V1: app token + the
+ric.api user token). Safe to run more than once: existing items are kept.
+"""
+
+import asyncio
+import html
+
+import httpx
+from sqlalchemy import select
+
+from app.core.config import get_settings
+from app.db.session import create_engine_from_settings, create_session_factory
+from app.models import AssignmentGroup, Store
+
+CATEGORIES = {
+    "Network": ["WAN", "Wireless", "LAN"],
+    "Hardware": ["POS", "Printer", "Scanner"],
+    "Software": ["Register", "Back Office"],
+    "Inquiry": [],
+}
+REQUEST_TYPES = ["Monitoring", "Phone", "E-Mail", "Helpdesk", "Direct"]
+PENDING_REASONS = [
+    "Awaiting caller",
+    "Awaiting vendor",
+    "Awaiting site visit",
+    "Awaiting change",
+    "Awaiting problem",
+]
+SOLUTION_TYPES = ["Solved (Permanently)", "Workaround", "Cancelled"]
+SHARED = {"entities_id": 0, "is_recursive": 1}
+
+
+class Glpi:
+    def __init__(self, url, app_token, user_token, transport=None):
+        self.http = httpx.Client(base_url=url.rstrip("/") + "/", timeout=30, transport=transport)
+        self.headers = {"Content-Type": "application/json"}
+        if app_token:
+            self.headers["App-Token"] = app_token
+        auth = {**self.headers, "Authorization": f"user_token {user_token}"}
+        response = self.http.get("initSession", headers=auth)
+        if response.status_code != 200:
+            raise SystemExit(f"[FAIL] GLPI login: HTTP {response.status_code} {response.text}")
+        self.headers["Session-Token"] = response.json()["session_token"]
+        self.created = self.kept = 0
+
+    def find(self, itemtype, name, parent_field=None, parent_id=None):
+        params = {"searchText[name]": name, "range": "0-999"}
+        response = self.http.get(itemtype, params=params, headers=self.headers)
+        if response.status_code == 400 and "ERROR_RANGE_EXCEED_TOTAL" in response.text:
+            return None
+        response.raise_for_status()
+        for item in response.json() if isinstance(response.json(), list) else []:
+            same_name = html.unescape(str(item.get("name") or "")).strip() == name
+            same_parent = parent_field is None or int(item.get(parent_field) or 0) == parent_id
+            if same_name and same_parent:
+                return int(item["id"])
+        return None
+
+    def ensure(self, itemtype, name, parent_field=None, parent_id=0, **fields):
+        found = self.find(itemtype, name, parent_field, parent_id)
+        if found is not None:
+            self.kept += 1
+            return found
+        body = {"name": name, **fields}
+        if parent_field:
+            body[parent_field] = parent_id
+        response = self.http.post(itemtype, json={"input": body}, headers=self.headers)
+        if response.status_code not in (200, 201):
+            raise SystemExit(
+                f"[FAIL] add {itemtype} {name!r}: HTTP {response.status_code} {response.text}"
+            )
+        self.created += 1
+        answer = response.json()
+        answer = answer[0] if isinstance(answer, list) else answer
+        print(f"  created {itemtype:<13} {name}")
+        return int(answer["id"])
+
+    def close(self):
+        self.http.get("killSession", headers=self.headers)
+        self.http.close()
+
+
+async def ric_data():
+    engine = create_engine_from_settings()
+    try:
+        async with create_session_factory(engine)() as session:
+            stores = (
+                await session.execute(
+                    select(Store.site_code, Store.name, Store.city).order_by(Store.site_code)
+                )
+            ).all()
+            groups = (
+                await session.scalars(select(AssignmentGroup.name).order_by(AssignmentGroup.name))
+            ).all()
+    finally:
+        await engine.dispose()
+    return stores, groups
+
+
+def main(transport=None):
+    settings = get_settings()
+    secret = lambda value: value.get_secret_value() if value else None  # noqa: E731
+    if not settings.glpi_v1_url or not settings.glpi_user_token:
+        raise SystemExit("[FAIL] set GLPI_V1_URL and GLPI_USER_TOKEN in ric-backend/.env first")
+    stores, groups = asyncio.run(ric_data())
+    if not stores:
+        raise SystemExit("[FAIL] no store in the RIC database: run scripts.seed all first")
+    glpi = Glpi(
+        settings.glpi_v1_url,
+        secret(settings.glpi_app_token),
+        secret(settings.glpi_user_token),
+        transport,
+    )
+    try:
+        for site_code, name, city in stores:
+            glpi.ensure(
+                "Location", f"{site_code} - {name}", "locations_id", 0, town=city or "", **SHARED
+            )
+        for name in groups:
+            glpi.ensure(
+                "Group",
+                name,
+                is_requester=1,
+                is_watcher=1,
+                is_assign=1,
+                is_notify=1,
+                is_usergroup=1,
+                **SHARED,
+            )
+        for parent, children in CATEGORIES.items():
+            parent_id = glpi.ensure(
+                "ITILCategory",
+                parent,
+                "itilcategories_id",
+                0,
+                is_incident=1,
+                is_request=1,
+                **SHARED,
+            )
+            for child in children:
+                glpi.ensure(
+                    "ITILCategory",
+                    child,
+                    "itilcategories_id",
+                    parent_id,
+                    is_incident=1,
+                    is_request=1,
+                    **SHARED,
+                )
+        for name in REQUEST_TYPES:
+            glpi.ensure("RequestType", name, is_active=1, is_ticketheader=1, is_itilfollowup=1)
+        for name in PENDING_REASONS:
+            glpi.ensure("PendingReason", name, **SHARED)
+        for name in SOLUTION_TYPES:
+            glpi.ensure("SolutionType", name, **SHARED)
+    finally:
+        glpi.close()
+    print(f"[OK] GLPI reference data: {glpi.created} created, {glpi.kept} already there")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it from the `ric-backend` folder (so it uses RIC's settings and database):
+
+```powershell
+uv run python -c "import runpy; runpy.run_path(r'C:\ric-glpi\glpi_bootstrap.py', run_name='__main__')"
+```
+
+Expected: `created Location 01234 - Chennai Anna Nagar` ... and `[OK] GLPI reference data:
+29 created` (`0 created` on a second run). Then link RIC to GLPI and give the 15-minute check
+its starting point:
+
+```powershell
+uv run python -m scripts.itsm_link              # stores 10 linked, groups linked; incidents 0 linked (none in GLPI yet)
+uv run python -m scripts.itsm_resync --start-watermark
+uv run python -m scripts.itsm_status --live     # verdict OK or WARN (worker not started yet)
+```
+
+The demo incidents from `scripts.seed` exist only in RIC (this GLPI has no copy of them); the
+app shows and handles them as before, and replies to their actions stay in RIC. Tickets you
+create in GLPI from now on are synced in both directions.
+
+### 6. Start RIC
+
+Windows only, once, in an **administrator** PowerShell (GLPI in Docker must reach port 8000):
+
+```powershell
+New-NetFirewallRule -DisplayName "RIC API 8000 from GLPI" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Any
+```
+
+Terminal 1 (ric-backend) - the API, reachable from Docker:
+
+```powershell
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Terminal 2 (ric-backend) - check GLPI reaches the API, then create the GLPI webhooks:
+
+```powershell
+docker compose -f C:\ric-glpi\docker-compose.yml exec glpi php -r "echo file_get_contents('http://host.docker.internal:8000/health'), PHP_EOL;"
+uv run python -m scripts.itsm_webhooks          # 4 webhooks "RIC - ...", status OK
+uv run python -m scripts.worker                 # first line ends with "GLPI sync on"
+```
+
+Leave terminals 1 and 2 running.
+
+### 7. Try it
+
+1. GLPI > Assistance > Create ticket: title `Wi-Fi down on sales floor`, description, **Location**
+   `01234 - Chennai Anna Nagar`, **Category** Network > Wireless, Urgency / Impact High,
+   *Assigned to*: group **Network Ops**. Add.
+2. Within about a minute: terminal 1 logs `POST /api/v1/integrations/glpi/webhooks/ticket/new 202`,
+   terminal 2 logs `glpi ticket synced ... outcome=done`. Open http://127.0.0.1:8000/docs,
+   `GET /api/v1/incidents` with header `X-Site-Id: 01234`: the new INC incident is listed
+   (GLPI's ticket gets the same number as its external id). `GET /api/v1/alerts` shows its alert
+   once the worker's LLM step ran.
+3. In the GLPI ticket: Answer, **private** follow-up: `Store please restart the access point in
+   the back office and confirm.` A minute later `GET /api/v1/actions` (X-Site-Id 01234) lists an
+   action.
+4. Reply in Swagger: `POST /api/v1/actions/{actionId}/responses`, headers `X-Site-Id: 01234`,
+   `X-User: priya.store-manager`, body `{"clientRequestId": "<any new UUID>"}` (add
+   `"answerYesNo": true` for a yes/no action, `"responseText": "..."` for a free-text one).
+   The reply appears in the GLPI timeline as `[Store 01234 - priya.store-manager] ...`.
+5. In GLPI add a **solution** (type Solved (Permanently)): the RIC incident becomes Resolved and
+   the store gets an "is it fixed?" action.
+6. `uv run python -m scripts.itsm_status`: verdict OK.
+
+### 8. Every day
+
+```powershell
+docker compose -f C:\ric-glpi\docker-compose.yml start           # GLPI (or Docker Desktop restarts it)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000             # terminal 1
+uv run python -m scripts.worker                                    # terminal 2
+uv run python -m scripts.itsm_status                               # any time
+```
+
+Stop: Ctrl+C in both terminals; `docker compose -f C:\ric-glpi\docker-compose.yml stop`.
+Start from scratch (all GLPI data lost): `docker compose -f C:\ric-glpi\docker-compose.yml down -v`,
+then steps 3-5 again.
+
+### 9. If something does not work
+
+| Symptom | Check / fix |
+|---|---|
+| `check_env`: GLPI "could not connect" | GLPI running? `docker compose ps`; URLs use port 8080 |
+| `check_env`: "refused" | OAuth client id / secret, `ric.api` password, API token or app token; API client IP range must be empty |
+| `itsm_link`: stores 0 linked | run the bootstrap (step 5); location names must be `<site code> - <name>` |
+| nothing arrives after a GLPI change | API started with `--host 0.0.0.0`? firewall rule? `scripts.itsm_webhooks --status`; GLPI Setup > Webhooks > queue; `docker compose -f C:\ric-glpi\docker-compose.yml exec glpi tail -n 20 /var/glpi/logs/webhook.log` ("is unsafe": `local_define.php` not mounted) |
+| webhooks answered 401 | `GLPI_WEBHOOK_SECRET` changed: restart the API, run `scripts.itsm_webhooks` again |
+| `itsm_status`: reconcile "no watermark" | `scripts.itsm_resync --start-watermark` |
+| a ticket created in GLPI is `ignored` | it has no Location, or the location is not a RIC store, or its type is Request |
+| store reply answered 503 | GLPI not reachable from the API; replies to GLPI incidents are saved only after GLPI accepts them |

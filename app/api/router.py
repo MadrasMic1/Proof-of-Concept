@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     actions,
+    admin_itsm,
     alerts,
     appointments,
     devices,
@@ -35,3 +36,4 @@ api_router.include_router(actions.router)
 api_router.include_router(notifications.router)
 api_router.include_router(portal_notifications.router)
 api_router.include_router(integrations.router)
+api_router.include_router(admin_itsm.router)

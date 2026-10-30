@@ -125,6 +125,13 @@ class Settings(BaseSettings):
     itsm_sync_retry_delays_seconds: str = "30,120,600,1800"
     itsm_scheduler_poll_seconds: float = Field(default=10.0, ge=1, le=300)
     itsm_inbox_retention_days: int = Field(default=14, ge=1, le=365)
+    # Sync status (Phase 20, scripts.itsm_status and GET /api/v1/admin/itsm/status): a due
+    # inbox row older than this is a warning (worker stopped or GLPI down); this many failed
+    # reconciliation runs in a row is a failure; GLPI clock drift (--live) warn / fail limits.
+    itsm_status_max_inbox_age_minutes: int = Field(default=10, ge=1, le=1440)
+    itsm_status_max_reconcile_failures: int = Field(default=3, ge=1, le=100)
+    itsm_clock_drift_warn_seconds: float = Field(default=30.0, ge=1, le=3600)
+    itsm_clock_drift_fail_seconds: float = Field(default=120.0, ge=1, le=3600)
 
     @field_validator("database_url")
     @classmethod
