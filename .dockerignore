@@ -1,0 +1,30 @@
+# Git & CI metadata
+.git
+.github
+.gitignore
+
+# Secrets & local environment files (never bake into image layers)
+.env
+.env.*
+!.env.example
+
+# Python caches & local virtual environments
+.venv
+venv
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Local scan reports & docs not needed in container build context
+security-reports
+README.md
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.gitleaks.toml

@@ -1,0 +1,229 @@
+name: CI/CD - Security, Test & Docker Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # 1. Code Quality (Ruff) & Static Application Security Testing (Bandit)
+  # ----------------------------------------------------------------------------
+  lint-and-sast:
+    name: Lint (Ruff) & SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python from .python-version
+        run: uv python install
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run Ruff lint check
+        run: uv run ruff check .
+
+      - name: Run Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Run Bandit SAST scan on app/ and scripts/
+        run: uvx bandit -r app scripts -ll -ii
+
+  # ----------------------------------------------------------------------------
+  # 2. Secret Scanning (Gitleaks), Dependency Audit (pip-audit) & Trivy FS
+  # ----------------------------------------------------------------------------
+  security-scans:
+    name: Secrets, Dependency Audit & IaC Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history for secret scanning
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan git history for leaked secrets (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Export locked production dependencies
+        run: uv export --frozen --no-dev --no-hashes -o requirements-prod.txt
+
+      - name: Audit Python dependencies for known CVEs (pip-audit)
+        run: uvx pip-audit -r requirements-prod.txt
+
+      - name: Scan repository & Dockerfile misconfigurations (Trivy FS)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 1
+
+  # ----------------------------------------------------------------------------
+  # 3. Automated Integration & Unit Tests (Pytest + PostgreSQL 16)
+  # ----------------------------------------------------------------------------
+  test:
+    name: Pytest (PostgreSQL Integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_superuser_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      ENVIRONMENT: test
+      DEBUG: "false"
+      DOCS_ENABLED: "false"
+      ADMIN_DATABASE_URL: postgresql://postgres:ci_superuser_password@127.0.0.1:5432/postgres
+      DATABASE_URL: postgresql+asyncpg://ric_app:ci_app_password@127.0.0.1:5432/ric_poc
+      CORS_ORIGINS: http://localhost:8081,http://localhost:3000
+      LLM_PROVIDER: fake
+      LLM_FALLBACK_PROVIDER: none
+      LLM_LIVE_TEST: "false"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python from .python-version
+        run: uv python install
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Bootstrap ric_poc and ric_poc_test databases
+        run: uv run python -m scripts.db_bootstrap
+
+      - name: Run full pytest suite (auto-migrates ric_poc_test via conftest.py)
+        run: uv run pytest -v
+
+  # ----------------------------------------------------------------------------
+  # 4. Build Final Docker Image, Scan with Trivy & Push to GHCR
+  # ----------------------------------------------------------------------------
+  docker-build-scan-push:
+    name: Build, Scan & Push Final Docker Image
+    needs: [lint-and-sast, security-scans, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata (tags & OCI labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build production Docker image locally for vulnerability scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan built Docker image with Trivy (SARIF report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          format: sarif
+          output: trivy-image-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-results.sarif
+
+      - name: Gate release on CRITICAL/HIGH image vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push verified final Docker image with SBOM & provenance
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          sbom: true
+          provenance: true

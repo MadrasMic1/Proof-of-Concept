@@ -1,0 +1,20 @@
+title = "Gitleaks configuration for ric-backend (tcshm/Proof-of-Concept)"
+
+[extend]
+# Inherit all default Gitleaks secret detection rules
+useDefault = true
+
+[allowlist]
+description = "Allowlist intentional placeholder values in .env.example and synthetic test fixtures"
+paths = [
+  '''^\.env\.example$''',
+  '''^tests/''',
+  '''^uv\.lock$''',
+]
+regexes = [
+  '''nvapi-your-key''',
+  '''ci_app_password''',
+  '''ci_superuser_password''',
+  '''ric_local_superuser''',
+  '''ric_local_app_pass''',
+]

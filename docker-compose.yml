@@ -1,0 +1,126 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ric-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-ric_local_superuser}
+      POSTGRES_DB: postgres
+    volumes:
+      - ric_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ric-net
+
+  db-init:
+    build:
+      context: .
+      target: runtime
+    image: ric-backend:latest
+    container_name: ric-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMIN_DATABASE_URL: postgresql://postgres:${POSTGRES_SUPERUSER_PASSWORD:-ric_local_superuser}@postgres:5432/postgres
+      DATABASE_URL: postgresql+asyncpg://ric_app:${RIC_APP_DB_PASSWORD:-ric_local_app_pass}@postgres:5432/ric_poc
+    command: >
+      sh -c "python -m scripts.db_bootstrap && alembic upgrade head"
+    restart: "no"
+    networks:
+      - ric-net
+
+  api:
+    build:
+      context: .
+      target: runtime
+    image: ric-backend:latest
+    container_name: ric-api
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_NAME: RIC Backend
+      APP_VERSION: 0.1.0
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DEBUG: ${DEBUG:-false}
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      REQUEST_LOG_ENABLED: ${REQUEST_LOG_ENABLED:-true}
+      DATABASE_URL: postgresql+asyncpg://ric_app:${RIC_APP_DB_PASSWORD:-ric_local_app_pass}@postgres:5432/ric_poc
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081,http://localhost:3000}
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_FALLBACK_PROVIDER: ${LLM_FALLBACK_PROVIDER:-none}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      GLPI_WEBHOOK_SECRET: ${GLPI_WEBHOOK_SECRET:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - ric-net
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    image: ric-backend:latest
+    container_name: ric-worker
+    restart: unless-stopped
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-staging}
+      DEBUG: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      DATABASE_URL: postgresql+asyncpg://ric_app:${RIC_APP_DB_PASSWORD:-ric_local_app_pass}@postgres:5432/ric_poc
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_FALLBACK_PROVIDER: ${LLM_FALLBACK_PROVIDER:-none}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      ITSM_PROVIDER: ${ITSM_PROVIDER:-glpi}
+      GLPI_V2_URL: ${GLPI_V2_URL:-}
+      GLPI_OAUTH_TOKEN_URL: ${GLPI_OAUTH_TOKEN_URL:-}
+      GLPI_OAUTH_CLIENT_ID: ${GLPI_OAUTH_CLIENT_ID:-}
+      GLPI_OAUTH_CLIENT_SECRET: ${GLPI_OAUTH_CLIENT_SECRET:-}
+      GLPI_API_USERNAME: ${GLPI_API_USERNAME:-ric.api}
+      GLPI_API_PASSWORD: ${GLPI_API_PASSWORD:-}
+      GLPI_V1_URL: ${GLPI_V1_URL:-}
+      GLPI_APP_TOKEN: ${GLPI_APP_TOKEN:-}
+      GLPI_USER_TOKEN: ${GLPI_USER_TOKEN:-}
+    command: ["python", "-m", "scripts.worker"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - ric-net
+
+volumes:
+  ric_pgdata:
+
+networks:
+  ric-net:
+    driver: bridge
