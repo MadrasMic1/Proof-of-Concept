@@ -78,7 +78,7 @@ jobs:
         run: uvx pip-audit -r requirements-prod.txt
 
       - name: Scan repository & Dockerfile misconfigurations (Trivy FS)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -184,7 +184,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan built Docker image with Trivy (SARIF report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
           format: sarif
@@ -199,7 +199,7 @@ jobs:
           sarif_file: trivy-image-results.sarif
 
       - name: Gate release on CRITICAL/HIGH image vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
           format: table
