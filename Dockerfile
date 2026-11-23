@@ -52,7 +52,7 @@ CMD ["pytest", "-v"]
 # Default build target
 # ==============================================================================
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.15-slim-bookworm AS runtime
 
 # Runtime environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
