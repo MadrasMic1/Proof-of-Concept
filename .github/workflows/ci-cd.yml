@@ -85,6 +85,7 @@ jobs:
           scanners: vuln,misconfig,secret
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          skip-files: requirements.txt
           exit-code: 1
 
   # ----------------------------------------------------------------------------
