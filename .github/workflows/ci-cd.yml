@@ -114,7 +114,6 @@ jobs:
       DOCS_ENABLED: "false"
       ADMIN_DATABASE_URL: postgresql://postgres:ci_superuser_password@127.0.0.1:5432/postgres
       DATABASE_URL: postgresql+asyncpg://ric_app:ci_app_password@127.0.0.1:5432/ric_poc
-      CORS_ORIGINS: http://localhost:8081,http://localhost:3000
       LLM_PROVIDER: fake
       LLM_FALLBACK_PROVIDER: none
       LLM_LIVE_TEST: "false"
