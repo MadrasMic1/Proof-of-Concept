@@ -235,7 +235,7 @@ jobs:
       - name: Build once & push candidate image with SBOM + Provenance (push/tag)
         id: build-push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
@@ -248,7 +248,7 @@ jobs:
 
       - name: Build image tarball for PR scanning (no push)
         if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
