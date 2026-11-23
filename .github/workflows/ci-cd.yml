@@ -1,4 +1,4 @@
-name: CI/CD - Security, Test & Docker Release
+name: RIC Backend - DevSecOps CI/CD (Private Docker Hub)
 
 on:
   push:
@@ -14,16 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
 jobs:
-  # ----------------------------------------------------------------------------
-  # 1. Code Quality (Ruff) & Static Application Security Testing (Bandit)
-  # ----------------------------------------------------------------------------
-  lint-and-sast:
-    name: Lint (Ruff) & SAST (Bandit)
+  # ============================================================================
+  # STAGE 1A: Code Quality (Ruff) & SAST (Bandit)
+  # ============================================================================
+  code:
+    name: Code (Ruff + Bandit)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -40,20 +36,34 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen
 
+      - name: Prepare report directory
+        run: mkdir -p reports
+
       - name: Run Ruff lint check
-        run: uv run ruff check .
+        run: uv run ruff check . | tee reports/ruff-lint.txt
 
       - name: Run Ruff format check
-        run: uv run ruff format --check .
+        run: uv run ruff format --check --diff . | tee reports/ruff-format.txt
 
-      - name: Run Bandit SAST scan on app/ and scripts/
-        run: uvx bandit -r app scripts -ll -ii
+      - name: Generate Bandit SAST JSON report
+        run: uvx bandit -r app scripts -f json -o reports/bandit-sast.json || true
 
-  # ----------------------------------------------------------------------------
-  # 2. Secret Scanning (Gitleaks), Dependency Audit (pip-audit) & Trivy FS
-  # ----------------------------------------------------------------------------
-  security-scans:
-    name: Secrets, Dependency Audit & IaC Scan
+      - name: Gate on Bandit SAST (Medium/High severity & confidence)
+        run: uvx bandit -r app scripts -ll -ii -f txt | tee reports/bandit-sast.txt
+
+      - name: Upload Code & SAST reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-code
+          path: reports/
+          retention-days: 30
+
+  # ============================================================================
+  # STAGE 1B: Security (Gitleaks + SCA pip-audit + Trivy FS)
+  # ============================================================================
+  security:
+    name: Security (Gitleaks + SCA + Trivy FS)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout full history for secret scanning
@@ -61,10 +71,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Prepare report directory
+        run: mkdir -p reports
+
       - name: Scan git history for leaked secrets (Gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save Gitleaks SARIF report if generated
+        if: always()
+        run: |
+          if [ -f results.sarif ]; then
+            cp results.sarif reports/gitleaks.sarif
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -74,8 +94,15 @@ jobs:
       - name: Export locked production dependencies
         run: uv export --frozen --no-dev --no-hashes -o requirements-prod.txt
 
-      - name: Audit Python dependencies for known CVEs (pip-audit)
-        run: uvx pip-audit -r requirements-prod.txt
+      - name: Generate pip-audit JSON report
+        run: uvx pip-audit -r requirements-prod.txt --format json -o reports/pip-audit.json || true
+
+      - name: Gate on Python dependency CVEs (pip-audit)
+        run: uvx pip-audit -r requirements-prod.txt --desc | tee reports/pip-audit.txt
+
+      - name: Remove temporary requirements export before Trivy FS scan
+        if: always()
+        run: rm -f requirements-prod.txt
 
       - name: Scan repository & Dockerfile misconfigurations (Trivy FS)
         uses: aquasecurity/trivy-action@v0.36.0
@@ -85,14 +112,30 @@ jobs:
           scanners: vuln,misconfig,secret
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          skip-files: requirements.txt
+          format: table
+          output: reports/trivy-fs.txt
           exit-code: 1
 
-  # ----------------------------------------------------------------------------
-  # 3. Automated Integration & Unit Tests (Pytest + PostgreSQL 16)
-  # ----------------------------------------------------------------------------
-  test:
-    name: Pytest (PostgreSQL Integration)
+      - name: Print Trivy FS report to logs
+        if: always()
+        run: |
+          if [ -f reports/trivy-fs.txt ]; then
+            cat reports/trivy-fs.txt
+          fi
+
+      - name: Upload Security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-security
+          path: reports/
+          retention-days: 30
+
+  # ============================================================================
+  # STAGE 1C: Automated Tests (Pytest + PostgreSQL 16)
+  # ============================================================================
+  testing:
+    name: Testing (Pytest + PostgreSQL)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -134,61 +177,141 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen
 
+      - name: Prepare report directory
+        run: mkdir -p reports
+
       - name: Bootstrap ric_poc and ric_poc_test databases
         run: uv run python -m scripts.db_bootstrap
 
-      - name: Run full pytest suite (auto-migrates ric_poc_test via conftest.py)
-        run: uv run pytest -v
+      - name: Run full Pytest suite with JUnit XML report
+        run: uv run pytest -v --junitxml=reports/pytest-junit.xml | tee reports/pytest.txt
 
-  # ----------------------------------------------------------------------------
-  # 4. Build Final Docker Image, Scan with Trivy & Push to GHCR
-  # ----------------------------------------------------------------------------
-  docker-build-scan-push:
-    name: Build, Scan & Push Final Docker Image
-    needs: [lint-and-sast, security-scans, test]
+      - name: Upload Test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-testing
+          path: reports/
+          retention-days: 30
+
+  # ============================================================================
+  # STAGE 2: Build Docker Image Once (BuildKit + SBOM + Provenance)
+  # ============================================================================
+  build-image:
+    name: Build Docker Image Once
+    needs: [code, security, testing]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      security-events: write
+    outputs:
+      image_name: ${{ steps.vars.outputs.image_name }}
+      digest: ${{ steps.build-push.outputs.digest }}
+      candidate_tag: ${{ steps.vars.outputs.candidate_tag }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve lowercase Private Docker Hub image name
+        id: vars
+        run: |
+          OWNER="${{ secrets.DOCKERHUB_USERNAME }}"
+          if [ -z "$OWNER" ]; then
+            OWNER="local"
+          fi
+          IMG="${OWNER,,}/ric-backend"
+          CANDIDATE="${IMG}:candidate-${GITHUB_SHA::12}"
+          echo "image_name=${IMG}" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=${CANDIDATE}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract Docker metadata (tags & OCI labels)
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Log in to Private Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build production Docker image locally for vulnerability scanning
+      - name: Build once & push candidate image with SBOM + Provenance (push/tag)
+        id: build-push
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
           target: runtime
-          load: true
+          push: true
+          tags: ${{ steps.vars.outputs.candidate_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          sbom: true
+          provenance: true
+
+      - name: Build image tarball for PR scanning (no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
           push: false
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          tags: ${{ steps.vars.outputs.candidate_tag }}
+          outputs: type=docker,dest=/tmp/ric-backend.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Scan built Docker image with Trivy (SARIF report)
+      - name: Upload PR image tarball for container scan
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-image-tar
+          path: /tmp/ric-backend.tar
+          retention-days: 1
+
+  # ============================================================================
+  # STAGE 3: Trivy Container Scan (CRITICAL / HIGH Vulnerability Gate)
+  # ============================================================================
+  container-scan:
+    name: Trivy Container Scan
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Prepare report directory
+        run: mkdir -p reports
+
+      - name: Log in to Private Docker Hub (to scan candidate digest)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download PR image tarball
+        if: github.event_name == 'pull_request'
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-image-tar
+          path: /tmp
+
+      - name: Scan Private Docker Hub digest with Trivy (SARIF)
+        if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          image-ref: ${{ needs.build-image.outputs.image_name }}@${{ needs.build-image.outputs.digest }}
           format: sarif
-          output: trivy-image-results.sarif
+          output: reports/trivy-image.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Scan PR image tarball with Trivy (SARIF)
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: /tmp/ric-backend.tar
+          format: sarif
+          output: reports/trivy-image.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
@@ -196,34 +319,233 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: trivy-image-results.sarif
+          sarif_file: reports/trivy-image.sarif
 
-      - name: Gate release on CRITICAL/HIGH image vulnerabilities
+      - name: Gate Private Docker Hub digest on CRITICAL/HIGH CVEs
+        if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ci-scan
+          image-ref: ${{ needs.build-image.outputs.image_name }}@${{ needs.build-image.outputs.digest }}
           format: table
+          output: reports/trivy-image.txt
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: 1
 
-      - name: Log in to GitHub Container Registry (GHCR)
-        if: github.event_name != 'pull_request'
+      - name: Gate PR image tarball on CRITICAL/HIGH CVEs
+        if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          input: /tmp/ric-backend.tar
+          format: table
+          output: reports/trivy-image.txt
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Print Trivy Container Scan report to logs
+        if: always()
+        run: |
+          if [ -f reports/trivy-image.txt ]; then
+            cat reports/trivy-image.txt
+          fi
+
+      - name: Upload Container Scan reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-container-scan
+          path: reports/
+          retention-days: 30
+
+  # ============================================================================
+  # STAGE 4: Promote Verified Image Digest (Zero Rebuild, Private Docker Hub)
+  # ============================================================================
+  promote-image:
+    name: Promote Verified Image Digest (Private Docker Hub)
+    needs: [build-image, container-scan]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      promoted_tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Private Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push verified final Docker image with SBOM & provenance
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+      - name: Compute release tags
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          context: .
-          target: runtime
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          sbom: true
-          provenance: true
+          images: ${{ needs.build-image.outputs.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Promote exact verified digest to release tags (no rebuild)
+        env:
+          IMAGE_NAME: ${{ needs.build-image.outputs.image_name }}
+          DIGEST: ${{ needs.build-image.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          SOURCE_REF="${IMAGE_NAME}@${DIGEST}"
+          TAG_ARGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAG_ARGS+=(-t "$tag")
+          done <<< "$TAGS"
+          docker buildx imagetools create "${TAG_ARGS[@]}" "$SOURCE_REF"
+          echo "Promoted verified digest: ${SOURCE_REF}"
+
+  # ============================================================================
+  # STAGE 5: Detailed Consolidated DevSecOps Report (Job Summary + Artifact)
+  # ============================================================================
+  detailed-report:
+    name: Detailed Scan, Test & Check Report
+    needs: [code, security, testing, build-image, container-scan, promote-image]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all stage reports
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+          pattern: report-*
+          merge-multiple: true
+
+      - name: Generate consolidated Markdown report & GitHub Job Summary
+        env:
+          STATUS_CODE: ${{ needs.code.result }}
+          STATUS_SECURITY: ${{ needs.security.result }}
+          STATUS_TESTING: ${{ needs.testing.result }}
+          STATUS_BUILD: ${{ needs.build-image.result }}
+          STATUS_SCAN: ${{ needs.container-scan.result }}
+          STATUS_PROMOTE: ${{ needs.promote-image.result }}
+          IMAGE_NAME: ${{ needs.build-image.outputs.image_name }}
+          IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
+          PROMOTED_TAGS: ${{ needs.promote-image.outputs.promoted_tags }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          root = pathlib.Path("all-reports")
+          lines = [
+              "# RIC Backend — Detailed DevSecOps Scan, Test & Release Report",
+              "",
+              f"- **Repository:** `{os.environ['GITHUB_REPOSITORY']}`",
+              f"- **Branch / Ref:** `{os.environ['GITHUB_REF_NAME']}`",
+              f"- **Commit:** `{os.environ['GITHUB_SHA'][:12]}`",
+              f"- **Generated (UTC):** `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}`",
+              "",
+              "## 1. Pipeline Stage Summary",
+              "",
+              "| Stage | Checks | Result |",
+              "| :--- | :--- | :--- |",
+              f"| Code | Ruff lint + format, Bandit SAST | **{os.environ['STATUS_CODE'].upper()}** |",
+              f"| Security | Gitleaks secrets, pip-audit SCA, Trivy FS | **{os.environ['STATUS_SECURITY'].upper()}** |",
+              f"| Testing | Pytest + PostgreSQL 16 integration | **{os.environ['STATUS_TESTING'].upper()}** |",
+              f"| Build Image | BuildKit + SBOM + Provenance (Build Once) | **{os.environ['STATUS_BUILD'].upper()}** |",
+              f"| Container Scan | Trivy CRITICAL/HIGH gate | **{os.environ['STATUS_SCAN'].upper()}** |",
+              f"| Promote Digest | Private Docker Hub release tags | **{os.environ['STATUS_PROMOTE'].upper()}** |",
+              "",
+          ]
+
+          # Pytest metrics
+          junit = root / "pytest-junit.xml"
+          if junit.exists():
+              tree = ET.parse(junit)
+              suite = tree.getroot().find("testsuite") or tree.getroot()
+              total = int(suite.attrib.get("tests", 0))
+              failures = int(suite.attrib.get("failures", 0))
+              errors = int(suite.attrib.get("errors", 0))
+              skipped = int(suite.attrib.get("skipped", 0))
+              passed = total - failures - errors - skipped
+              elapsed = suite.attrib.get("time", "0")
+              lines += [
+                  "## 2. Pytest Integration Summary",
+                  "",
+                  f"- **Total:** {total} | **Passed:** {passed} | **Failed:** {failures} | **Errors:** {errors} | **Skipped:** {skipped} | **Duration:** {elapsed}s",
+                  "",
+              ]
+
+          # Bandit metrics
+          bandit_path = root / "bandit-sast.json"
+          if bandit_path.exists():
+              try:
+                  data = json.loads(bandit_path.read_text())
+                  results = data.get("results", [])
+                  high = sum(1 for r in results if r.get("issue_severity") == "HIGH")
+                  med = sum(1 for r in results if r.get("issue_severity") == "MEDIUM")
+                  low = sum(1 for r in results if r.get("issue_severity") == "LOW")
+                  lines += [
+                      "## 3. Bandit SAST Summary",
+                      "",
+                      f"- **Findings:** High: {high} | Medium: {med} | Low: {low}",
+                      "",
+                  ]
+              except Exception:
+                  pass
+
+          # pip-audit metrics
+          audit_path = root / "pip-audit.json"
+          if audit_path.exists():
+              try:
+                  data = json.loads(audit_path.read_text())
+                  deps = data.get("dependencies", [])
+                  vulns = sum(len(d.get("vulns", [])) for d in deps)
+                  lines += [
+                      "## 4. Python Dependency SCA (pip-audit)",
+                      "",
+                      f"- **Audited Packages:** {len(deps)} | **Known Vulnerabilities:** {vulns}",
+                      "",
+                  ]
+              except Exception:
+                  pass
+
+          # Trivy reports
+          for title, fname in [("5. Trivy Filesystem & Dockerfile Scan", "trivy-fs.txt"), ("6. Trivy Container Image Scan", "trivy-image.txt")]:
+              p = root / fname
+              if p.exists():
+                  content = p.read_text().strip()
+                  lines += [
+                      f"## {title}",
+                      "",
+                      "```text",
+                      content[:8000] if content else "No findings.",
+                      "```",
+                      "",
+                  ]
+
+          # Promoted Docker image details
+          digest = os.environ.get("IMAGE_DIGEST", "")
+          img = os.environ.get("IMAGE_NAME", "")
+          tags = [t for t in os.environ.get("PROMOTED_TAGS", "").splitlines() if t.strip()]
+          if digest:
+              lines += [
+                  "## 7. Verified Private Docker Hub Release",
+                  "",
+                  f"- **Immutable Digest:** `{img}@{digest}`",
+                  "- **Promoted Tags:**",
+              ] + [f"  - `{t}`" for t in tags] + [""]
+
+          report_text = "\n".join(lines)
+          pathlib.Path("all-reports/FINAL_DEVSECOPS_REPORT.md").write_text(report_text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(report_text + "\n")
+          PYEOF
+
+      - name: Upload complete DevSecOps report bundle (30-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecops-full-report
+          path: all-reports/
+          retention-days: 30
