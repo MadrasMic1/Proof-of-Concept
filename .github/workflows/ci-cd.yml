@@ -202,25 +202,21 @@ jobs:
     needs: [code, security, testing]
     runs-on: ubuntu-latest
     outputs:
-      image_name: ${{ steps.vars.outputs.image_name }}
+      # Only export non-secret digest (GitHub masks/strips job outputs containing secrets)
       digest: ${{ steps.build-push.outputs.digest }}
-      candidate_tag: ${{ steps.vars.outputs.candidate_tag }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Resolve lowercase Private Docker Hub image name
-        id: vars
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          OWNER="${{ secrets.DOCKERHUB_USERNAME }}"
-          if [ -z "$OWNER" ]; then
-            OWNER="local"
-          fi
+          OWNER="${DOCKERHUB_USERNAME:-local}"
           IMG="${OWNER,,}/ric-backend"
-          CANDIDATE="${IMG}:candidate-${GITHUB_SHA::12}"
-          echo "image_name=${IMG}" >> "$GITHUB_OUTPUT"
-          echo "candidate_tag=${CANDIDATE}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=${IMG}" >> "$GITHUB_ENV"
+          echo "CANDIDATE_TAG=${IMG}:candidate-${GITHUB_SHA::12}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -240,7 +236,7 @@ jobs:
           context: .
           target: runtime
           push: true
-          tags: ${{ steps.vars.outputs.candidate_tag }}
+          tags: ${{ env.CANDIDATE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           sbom: true
@@ -253,7 +249,7 @@ jobs:
           context: .
           target: runtime
           push: false
-          tags: ${{ steps.vars.outputs.candidate_tag }}
+          tags: ${{ env.CANDIDATE_TAG }}
           outputs: type=docker,dest=/tmp/ric-backend.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -278,8 +274,13 @@ jobs:
       security-events: write
 
     steps:
-      - name: Prepare report directory
-        run: mkdir -p reports
+      - name: Prepare report directory & resolve image name
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          mkdir -p reports
+          OWNER="${DOCKERHUB_USERNAME:-local}"
+          echo "IMAGE_NAME=${OWNER,,}/ric-backend" >> "$GITHUB_ENV"
 
       - name: Log in to Private Docker Hub (to scan candidate digest)
         if: github.event_name != 'pull_request'
@@ -299,7 +300,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-image.outputs.image_name }}@${{ needs.build-image.outputs.digest }}
+          image-ref: ${{ env.IMAGE_NAME }}@${{ needs.build-image.outputs.digest }}
           format: sarif
           output: reports/trivy-image.sarif
           severity: CRITICAL,HIGH
@@ -325,7 +326,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ needs.build-image.outputs.image_name }}@${{ needs.build-image.outputs.digest }}
+          image-ref: ${{ env.IMAGE_NAME }}@${{ needs.build-image.outputs.digest }}
           format: table
           output: reports/trivy-image.txt
           severity: CRITICAL,HIGH
@@ -366,10 +367,15 @@ jobs:
     needs: [build-image, container-scan]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    outputs:
-      promoted_tags: ${{ steps.meta.outputs.tags }}
 
     steps:
+      - name: Resolve lowercase Private Docker Hub image name
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          OWNER="${DOCKERHUB_USERNAME:-local}"
+          echo "IMAGE_NAME=${OWNER,,}/ric-backend" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -383,7 +389,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ needs.build-image.outputs.image_name }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -393,17 +399,28 @@ jobs:
 
       - name: Promote exact verified digest to release tags (no rebuild)
         env:
-          IMAGE_NAME: ${{ needs.build-image.outputs.image_name }}
           DIGEST: ${{ needs.build-image.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
+          mkdir -p reports
           SOURCE_REF="${IMAGE_NAME}@${DIGEST}"
           TAG_ARGS=()
           while IFS= read -r tag; do
-            [ -n "$tag" ] && TAG_ARGS+=(-t "$tag")
+            if [ -n "$tag" ]; then
+              TAG_ARGS+=(-t "$tag")
+              echo "${tag#*:}" >> reports/promoted-tags.txt
+            fi
           done <<< "$TAGS"
           docker buildx imagetools create "${TAG_ARGS[@]}" "$SOURCE_REF"
           echo "Promoted verified digest: ${SOURCE_REF}"
+
+      - name: Upload promoted tags list
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-promote
+          path: reports/
+          retention-days: 30
 
   # ============================================================================
   # STAGE 5: Detailed Consolidated DevSecOps Report (Job Summary + Artifact)
@@ -429,9 +446,7 @@ jobs:
           STATUS_BUILD: ${{ needs.build-image.result }}
           STATUS_SCAN: ${{ needs.container-scan.result }}
           STATUS_PROMOTE: ${{ needs.promote-image.result }}
-          IMAGE_NAME: ${{ needs.build-image.outputs.image_name }}
           IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
-          PROMOTED_TAGS: ${{ needs.promote-image.outputs.promoted_tags }}
         run: |
           python3 - <<'PYEOF'
           import json, os, pathlib, xml.etree.ElementTree as ET
@@ -527,15 +542,17 @@ jobs:
 
           # Promoted Docker image details
           digest = os.environ.get("IMAGE_DIGEST", "")
-          img = os.environ.get("IMAGE_NAME", "")
-          tags = [t for t in os.environ.get("PROMOTED_TAGS", "").splitlines() if t.strip()]
+          tags_file = root / "promoted-tags.txt"
+          tags = [t.strip() for t in tags_file.read_text().splitlines() if t.strip()] if tags_file.exists() else []
           if digest:
               lines += [
                   "## 7. Verified Private Docker Hub Release",
                   "",
-                  f"- **Immutable Digest:** `{img}@{digest}`",
-                  "- **Promoted Tags:**",
-              ] + [f"  - `{t}`" for t in tags] + [""]
+                  f"- **Repository:** `ric-backend` (Private Docker Hub)",
+                  f"- **Immutable Digest:** `{digest}`",
+                  "- **Promoted Tags:** " + (", ".join(f"`{t}`" for t in tags) if tags else "*(not promoted)*"),
+                  "",
+              ]
 
           report_text = "\n".join(lines)
           pathlib.Path("all-reports/FINAL_DEVSECOPS_REPORT.md").write_text(report_text)
