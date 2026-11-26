@@ -1,0 +1,34 @@
+kb_ref: KB-POS-001
+title: POS or register application frozen
+summary: Recover a POS terminal or register whose sales application has frozen or stopped responding.
+applies_to: [pos, register]
+fault_codes: [APP_ERROR]
+kb_tags: [pos-app-restart, register-app-restart]
+symptoms:
+  - till frozen
+  - pos not responding
+  - register screen stuck
+  - sales application error
+  - application hang
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Wait one minute in case the till is busy, then try to go back to the main sales screen.
+    ask: Is the till responding again?
+    outcomes:
+      responding: {label: "Yes, it responds", end: resolved}
+      frozen: {label: "Still frozen", next: S2}
+  S2:
+    instruction: Close the sales application from the till menu and open it again. If the menu does not respond, hold the power button for 10 seconds to restart the till.
+    ask: Did the till start and open the sales screen?
+    outcomes:
+      started: {label: "Yes, sales screen open", next: S3}
+      not_started: {label: "No, it did not start", end: needs_technician}
+  S3:
+    instruction: Sign in, scan one item to test a sale, then void the sale.
+    ask: Did the test sale work?
+    outcomes:
+      works: {label: "Yes, it worked", end: resolved}
+      not_works: {label: "No, it failed", end: exhausted}

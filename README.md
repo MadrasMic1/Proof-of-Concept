@@ -1042,3 +1042,162 @@ then steps 3-5 again.
 | `itsm_status`: reconcile "no watermark" | `scripts.itsm_resync --start-watermark` |
 | a ticket created in GLPI is `ignored` | it has no Location, or the location is not a RIC store, or its type is Request |
 | store reply answered 503 | GLPI not reachable from the API; replies to GLPI incidents are saved only after GLPI accepts them |
+
+## Agentic system - Phase 1 (foundation)
+
+New code lives in `app/agentic/` and never changes how the existing backend behaves. Settings: `app/agentic/config.py` (own class, same `.env`; see the AGENTIC block of `.env.example`). Every limit, timeout and threshold of the agentic system is a `.env` value.
+
+| Piece | What |
+|---|---|
+| Migration 0005 | 9 tables, prefix `agent_` (33 tables in total): store graph edges, chat sessions and messages, KB articles and chunks (pgvector `vector(1536)` + generated `tsvector`), guide sessions, incident drafts (fields follow `incidents`), agent LLM calls, MCP tool calls |
+| `ric_mcp` | login of the MCP server: reads store / inventory / status / ITSM / agent tables; writes only guide sessions, drafts, tool-call and audit rows; never incidents |
+| `ric_kb_admin` | login of KB ingestion: the two KB tables only |
+| Grants | `app/agentic/db_roles.py`, applied by migration 0005 and `scripts.agentic_db_setup` |
+
+One-time setup (after installing pgvector on the PostgreSQL server):
+
+```powershell
+# .env: MCP_DATABASE_URL, KB_ADMIN_DATABASE_URL, AGENT_USER_CONTEXT_TOKEN_SECRET (see .env.example)
+uv run python -m scripts.agentic_db_setup     # extension vector + logins, both databases
+uv run alembic upgrade head                   # 0005
+uv run python -m scripts.agentic_db_setup     # grants on the main database
+uv run python -m scripts.agentic_check_env    # everything OK
+uv run python -m scripts.agent_spike          # MCP + token + one Agent Framework run
+```
+
+## Agentic system - Phase 2 (store graph and store context)
+
+What the assistant knows about a store, built by plain code (no LLM):
+
+| Piece | What |
+|---|---|
+| `config/element_catalogue.yaml` | one entry per device / network element type: synonyms, impact text, incident routing, fault rules on `status_reason` (`staff_can_fix`, `kb_tags`) |
+| `app/agentic/store_graph/` | store graph: edges derived from `uplink_element_id` / `connected_network_element_id` plus `agent_store_dependencies` (WAN redundancy group, card payments); generic engine for root causes, failover, folding, suspects |
+| `app/agentic/store_context/` | snapshot read in one read-only REPEATABLE READ transaction (same tables as the app screens), compact text within `STORE_CTX_SNAPSHOT_MAX_TOKENS`, device resolution |
+| `seed/data/agent_dependencies.yaml` | explicit edges, by inventory template key |
+
+```powershell
+uv run python -m scripts.seed_store_graph                       # after scripts.seed
+uv run python -m scripts.store_snapshot --validate              # catalogue vs master data
+uv run python -m scripts.store_snapshot --site 01234            # findings + snapshot text
+uv run python -m scripts.store_snapshot --site 01234 --find "till 2 printer"
+```
+
+A new element type needs a catalogue entry (and edges if it is not on the inventory
+uplink columns), not code. `STORE_CTX_STALE_CHECK` is off with seeded data.
+
+## Agentic system - Phase 3 (knowledge base)
+
+Structured KB articles for guided troubleshooting (no LLM):
+
+| Piece | What |
+|---|---|
+| `kb/articles/*.yaml` | 7 articles, one per staff-fixable fault of the catalogue; steps -> outcomes -> next step or end (resolved / exhausted / needs_technician) |
+| `app/agentic/kb/articles.py` | validation (all or nothing, incl. coverage of every staff-fixable fault) and chunking |
+| `app/agentic/kb/ingest.py` | versioned publishing (content hash), retired versions kept for pinned guides |
+| `app/agentic/kb/retrieval.py` | exact (type + fault) -> tags -> full-text + vector search (RRF) |
+| `app/agentic/kb/guide.py` | guide state: version pinned, six checks per move, unclear / user_cannot_do |
+
+```powershell
+uv run python -m scripts.kb_ingest --check                  # validate only
+uv run python -m scripts.kb_ingest --publish                # as ric_kb_admin
+uv run python -m scripts.kb_search --type printer --fault PAPER_JAM
+uv run python -m scripts.kb_search --text "receipt comes out blank"
+uv run python -m scripts.kb_guide_demo --site 01456 --kb KB-PRN-001 --outcomes jam_seen,works
+```
+
+Embeddings: NVIDIA (`KB_EMBEDDING_PROVIDER=nvidia`, 768 dimensions (first 768 of 2048, re-normalised), zero-padded to the
+1536-wide column). To move to Azure AI Foundry: set `KB_EMBEDDING_PROVIDER=foundry`,
+`KB_EMBEDDING_BASE_URL`, `KB_EMBEDDING_API_KEY`, `KB_EMBEDDING_MODEL` (deployment name),
+empty `KB_EMBEDDING_REQUEST_DIM`, then run `scripts.kb_search --embed-check` and
+`scripts.kb_ingest --publish --reembed`.
+
+## Agentic system - Phase 4 (incident drafts)
+
+Validated incident drafts for the Incident Desk agent (no LLM, never creates an incident):
+
+| Piece | What |
+|---|---|
+| `app/agentic/drafts/triage.py` | baseline impact / urgency (1 = high), clamping, title overlap, mention check, masking |
+| `app/agentic/drafts/duplicates.py` | strong (same CI / finding as an active incident) and possible (similar title, other chat's draft) |
+| `app/agentic/drafts/service.py` | prepare (manager only, fresh snapshot, evidence-checked text, generated evidence block, 15-minute expiry), revise, get, cancel |
+| `app/agentic/drafts/mapping.py` | draft -> `NewIncident` of the existing incident service (used by Confirm later) |
+
+```powershell
+uv run python -m scripts.draft_demo --site 03340 --root "RF Gun 02" --impact 1 --urgency 1
+uv run python -m scripts.draft_demo --site 01234 --root WAN01234-PRI
+```
+
+## Agentic system - Phase 5 (MCP server)
+
+The agents' only way to reach data: a separate process (FastMCP, Streamable HTTP,
+stateless, `/mcp`) logged in as `ric_mcp`. 19 tools in `app/agentic/tools/`
+(store / graph, KB and guide, ITSM read and drafts); `config/tool_policy.yaml` says which
+agent may call which tool (store staff never get the draft tools). Every call: token
+(`Authorization: Bearer`, signed with `AGENT_USER_CONTEXT_TOKEN_SECRET`) -> switch ->
+policy -> argument check -> rate limits -> own transaction -> envelope -> audit row in
+`agent_tool_calls`. Tools have no store / user / role parameters; those come from the token.
+
+```powershell
+uv run python -m scripts.mcp_server --check     # build everything and exit
+uv run python -m scripts.mcp_server             # run on MCP_HOST:MCP_PORT (GET /healthz)
+uv run python -m scripts.mcp_call --site 01234 --agent store_insight --tool store_get_findings
+uv run python -m scripts.mcp_call --site 01456 --agent kb_guide --chat --tool kb_guide_start --arg kb_ref=KB-PRN-001
+```
+
+## Agentic system - Phase 6 (agents)
+
+Three specialist agents on Microsoft Agent Framework, calling the MCP server's tools:
+
+| Piece | What |
+|---|---|
+| `app/agentic/llm/` | metered HTTP transport under the OpenAI client: switch, model-call cap, Nemotron thinking off, one `agent_llm_calls` row per request; targets from `AGENT_LLM_*` (fallback `AGENT_FALLBACK_*`) |
+| `app/agentic/agents/bridge.py` | the agent's tools built from the Phase 5 registry, calling the MCP server with the token; untrusted text wrapped; tool-call cap |
+| `app/agentic/agents/runtime.py` | one specialist run: token, tools from the policy, `submit_result`, timeout, validation, one repair, fallback run |
+| `app/agentic/agents/specialists.py` | Store Insight, KB Guide, Incident Desk: the model reports outcome + ids, code builds the result from this run's tool results |
+
+```powershell
+uv run python -m scripts.agent_run --site 01234 --agent store_insight --question "why are card payments slow"
+uv run python -m scripts.agent_run --site 01456 --agent kb_guide --role store_staff --mode start --element-type printer --fault-code PAPER_JAM
+```
+
+Live test: `AGENT_LIVE_TEST=true`, then `uv run pytest tests/agentic/test_agent_live.py -v -s`.
+
+## Agentic system - Phase 7 (conversation)
+
+A whole conversation with the RIC Store Assistant (terminal now, HTTP next):
+
+| Piece | What |
+|---|---|
+| `app/agentic/chat/sessions.py` | one active chat per user per store, idle expiry, turn lock (session advisory lock), `client_message_id` replay, the turn window |
+| `app/agentic/chat/state.py` | conversation state derived from guide / draft rows (never written by a model) |
+| `app/agentic/chat/orchestrator.py` | the orchestrator: ask_store_insight / ask_kb_guide / ask_incident_desk / submit_answer; code fills every id; staff cannot draft |
+| `app/agentic/chat/composer.py` | `AssistantResponse`: text from the model, cards from data, Confirm action only from state, no false "raised" claims |
+| `app/agentic/chat/turn.py` | one turn end to end; compaction after the response |
+
+```powershell
+uv run python -m scripts.chat_cli --site 03340 --user demo.staff --role store_staff
+uv run python -m scripts.chat_cli --site 01234 --user demo.manager --role store_manager --say "why are card payments slow today"
+```
+
+## Agentic system - Phase 8 (chat API, Confirm -> RIC + GLPI)
+
+The RIC Store Assistant over HTTP (`X-Site-Id`, `X-User`; role from `AGENT_DEV_USER_ROLES`):
+
+| Endpoint | What |
+|---|---|
+| `POST /api/v1/chat/messages` | one turn -> `AssistantResponse` (`{"text", "clientMessageId"}`) |
+| `GET /api/v1/chat/session` | the active chat: state, Confirm action, messages |
+| `POST /api/v1/chat/session/new` | start a new conversation |
+| `POST /api/v1/chat/actions` | `confirm_incident` / `cancel_draft` (store manager) |
+
+Confirm (one transaction, after a duplicate re-check) creates the incident through the
+existing incident service and, with `AGENT_CONFIRM_TO_GLPI=true`, its GLPI ticket
+(`app/itsm/tickets.py`: location, assigned group, category, CI, external id = RIC number).
+If GLPI cannot be reached nothing is created and the manager taps Confirm again. Run the
+MCP server (`scripts.mcp_server`) next to the API.
+
+```powershell
+uv run python -m scripts.chat_http --site 03340 --user priya.store-manager --say "my rf gun 2 keeps dying, please raise a ticket"
+uv run python -m scripts.chat_http --site 03340 --user priya.store-manager --confirm
+```

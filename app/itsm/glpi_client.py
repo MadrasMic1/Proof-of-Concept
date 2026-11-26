@@ -601,6 +601,48 @@ class GlpiClient:
     async def update_webhook(self, webhook_id: int, fields: dict[str, Any]) -> None:
         await self._v1_write("PUT", f"Webhook/{webhook_id}", {"input": fields})
 
+    # --- RIC -> GLPI: new tickets (Agentic Phase 8) -------------------------------------
+
+    async def create_ticket(self, fields: dict[str, Any]) -> int:
+        """Create one ticket with API V1 (fields as V1 names); returns its GLPI id."""
+        payload = await self._v1_write("POST", "Ticket", {"input": fields})
+        entry = payload[0] if isinstance(payload, list) and payload else payload
+        ticket_id = _ref_id(entry.get("id")) if isinstance(entry, dict) else None
+        if ticket_id is None:
+            raise ItsmRejected("GLPI V1 POST Ticket: no id in the answer")
+        return ticket_id
+
+    async def link_item(self, ticket_id: int, itemtype: str, item_id: int) -> None:
+        """Link an asset (the incident's CI) to a ticket."""
+        body = {"input": {"tickets_id": ticket_id, "itemtype": itemtype, "items_id": item_id}}
+        await self._v1_write("POST", "Item_Ticket", body)
+
+    async def find_category_id(self, category: str, subcategory: str | None) -> int | None:
+        """The ITIL category "<category> > <subcategory>", else "<category>", compared
+        case-insensitively on GLPI's complete name; None when GLPI has neither. The
+        category list is read once per client."""
+        categories: dict[str, int] | None = getattr(self, "_categories", None)
+        if categories is None:
+            categories = {}
+            try:
+                items = await self._v1_list("ITILCategory")
+            except (ItsmRejected, ItsmNotFound):
+                items = []
+            for item in items:
+                item_id = _ref_id(item.get("id"))
+                name = _ref_name(item.get("completename")) or _ref_name(item.get("name"))
+                if item_id is not None and name:
+                    key = " > ".join(part.strip().lower() for part in name.split(">"))
+                    categories.setdefault(key, item_id)
+            self._categories = categories
+        wanted = [category.strip().lower()]
+        if subcategory:
+            wanted.insert(0, f"{wanted[0]} > {subcategory.strip().lower()}")
+        for key in wanted:
+            if key in categories:
+                return categories[key]
+        return None
+
     async def aclose(self) -> None:
         try:
             if self._session is not None:

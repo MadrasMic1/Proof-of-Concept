@@ -1,0 +1,34 @@
+kb_ref: KB-PRN-002
+title: Printer out of paper
+summary: Load a new paper roll in a receipt or checkout printer that has run out of paper.
+applies_to: [printer]
+fault_codes: [PAPER_OUT]
+kb_tags: [printer-paper]
+symptoms:
+  - printer out of paper
+  - no paper
+  - paper light blinking
+  - receipt not coming out
+  - blank receipt
+audience: store_staff
+estimated_minutes: 3
+start: S1
+steps:
+  S1:
+    instruction: Open the printer cover and look at the paper roll.
+    ask: Is there paper in the printer?
+    outcomes:
+      no_paper: {label: "No paper", next: S2}
+      has_paper: {label: "Paper is there", next: S3}
+  S2:
+    instruction: Insert a new roll so the paper feeds from underneath, pull a little paper out, and close the cover until it clicks.
+    ask: Does the printer print now?
+    outcomes:
+      works: {label: "Yes, it prints", end: resolved}
+      not_works: {label: "Still not printing", next: S3}
+  S3:
+    instruction: Make sure the roll is the right size for this printer, the paper is not upside down and the cover is fully closed. Print a test receipt from the till menu.
+    ask: Did the test receipt print?
+    outcomes:
+      works: {label: "Yes, it printed", end: resolved}
+      not_works: {label: "No, it did not", end: needs_technician}

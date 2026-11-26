@@ -22,6 +22,7 @@ from app.core.config import Settings, get_settings
 from app.db.migrate import alembic_config
 from app.main import create_app
 from app.models import (
+    AgentStoreDependency,
     AiPromptVersion,
     AiWorkflowRun,
     ApiRequestLog,
@@ -219,6 +220,7 @@ _SEEDED_TABLES_DELETE_ORDER = (
     NetworkEvent,
     RawNetworkEvent,
     EventProcessingRun,
+    AgentStoreDependency,
     Device,
     NetworkElement,
     AiPromptVersion,

@@ -1,0 +1,22 @@
+# seed/data/agent_dependencies.yaml
+# Store-graph edges the inventory does not describe (agent_store_dependencies).
+# Applied to every store, like inventory_template.yaml; element references are the
+# keys of inventory_template.yaml. Load with: uv run python -m scripts.seed_store_graph
+#
+# Edges the graph DERIVES from the inventory itself (never listed here):
+#   network_elements.uplink_element_id         element -> its uplink (switch / gateway)
+#   devices.connected_network_element_id       device  -> its switch / access point
+#
+# A redundancy group is a set of alternatives: the source works while ANY member
+# works. preferred: true marks the member that normally carries the traffic, so
+# "preferred down, other up" is a failover and "other down" only reduces resilience.
+element_edges:
+  - {from: "gw", to: "wan_pri", relation: "connects_via", redundancy_group: "wan", preferred: true}
+  - {from: "gw", to: "wan_bkp", relation: "connects_via", redundancy_group: "wan"}
+  - {from: "wan_pri", to: "rtr1", relation: "connects_via"}
+  - {from: "wan_bkp", to: "rtr2", relation: "connects_via"}
+
+# Every active device of these types uses the service (catalogue: services).
+device_services:
+  - {device_type: "pos", service: "card_payments"}
+  - {device_type: "register", service: "card_payments"}

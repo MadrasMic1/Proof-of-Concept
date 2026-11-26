@@ -1,0 +1,33 @@
+kb_ref: KB-RF-001
+title: RF gun low battery
+summary: Charge or swap an RF gun (handheld scanner) whose battery is low.
+applies_to: [rf_gun]
+fault_codes: [BATTERY_LOW]
+kb_tags: [rf-battery]
+symptoms:
+  - low battery
+  - rf gun battery
+  - scanner keeps switching off
+  - handheld not charging
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Put the RF gun in its charging cradle and check the charging light comes on.
+    ask: Is the charging light on?
+    outcomes:
+      charging: {label: "Yes, it is charging", next: S2}
+      not_charging: {label: "No charging light", next: S3}
+  S2:
+    instruction: Leave this RF gun charging. Take a charged RF gun or a spare charged battery from the charging station if one is available.
+    ask: Do you have a charged RF gun to use?
+    outcomes:
+      have_spare: {label: "Yes, I have one", end: resolved}
+      no_spare: {label: "No spare available", end: exhausted}
+  S3:
+    instruction: Remove the battery, check the contacts are clean, refit it firmly and put the RF gun back in the cradle. Try another cradle slot if there is one.
+    ask: Is the charging light on now?
+    outcomes:
+      charging: {label: "Yes, it is charging", next: S2}
+      not_charging: {label: "Still no light", end: needs_technician}

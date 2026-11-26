@@ -1,0 +1,39 @@
+# config/tool_policy.yaml
+# Which MCP tools each specialist agent may call, and what each role may not.
+# Read by the MCP server (every call) and later by the chat gateway (tool lists).
+# Deny by default: a tool not listed for an agent is refused. The server refuses to
+# start when this file and the registered tools disagree. Bump version on any change:
+# tokens carry it and a different version is refused (policy_mismatch).
+version: 1
+roles: [store_staff, store_manager]
+agents:
+  store_insight:
+    - store_get_findings
+    - store_resolve_device
+    - store_get_node_status
+    - store_get_node_history
+    - graph_neighbourhood
+    - graph_impact_of
+    - graph_explain_path
+    - itsm_search_incidents
+    - itsm_get_incident
+  kb_guide:
+    - kb_find_articles
+    - kb_get_article
+    - kb_guide_start
+    - kb_guide_get_state
+    - kb_guide_record_outcome
+    - kb_guide_end
+  incident_desk:
+    - itsm_search_incidents
+    - itsm_get_incident
+    - itsm_check_duplicates
+    - itsm_prepare_draft
+    - itsm_revise_draft
+    - itsm_get_draft
+role_deny:
+  store_staff:
+    - itsm_check_duplicates
+    - itsm_prepare_draft
+    - itsm_revise_draft
+    - itsm_get_draft

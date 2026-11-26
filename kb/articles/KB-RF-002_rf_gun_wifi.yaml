@@ -1,0 +1,33 @@
+kb_ref: KB-RF-002
+title: RF gun not connecting to Wi-Fi
+summary: Reconnect an RF gun (handheld scanner) that has lost its Wi-Fi connection.
+applies_to: [rf_gun]
+fault_codes: [WIFI_DISCONNECTED]
+kb_tags: [rf-wifi]
+symptoms:
+  - rf gun not connecting
+  - scanner no wifi
+  - handheld disconnected
+  - wireless dropping
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Move to the checkout area or the store entrance, where Wi-Fi is usually strong, and wait one minute.
+    ask: Has the RF gun reconnected?
+    outcomes:
+      connected: {label: "Yes, connected", end: resolved}
+      not_connected: {label: "Still not connected", next: S2}
+  S2:
+    instruction: Restart the RF gun - hold the power button, choose Restart and wait until it has started.
+    ask: Has it reconnected after the restart?
+    outcomes:
+      connected: {label: "Yes, connected", end: resolved}
+      not_connected: {label: "Still not connected", next: S3}
+  S3:
+    instruction: Try another RF gun in the same place.
+    ask: Does the other RF gun connect?
+    outcomes:
+      other_works: {label: "Yes, the other works", end: needs_technician}
+      other_fails: {label: "No, it fails too", end: exhausted}

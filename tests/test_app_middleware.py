@@ -127,12 +127,7 @@ def test_console_formatter_is_one_readable_line() -> None:
 
 # --- settings ----------------------------------------------------------------
 def _settings(**values: object) -> Settings:
-    return Settings(
-        _env_file=None,
-        database_url="postgresql+asyncpg://u:p@localhost/db",
-        cors_origins=values.pop("cors_origins", ""),
-        **values,
-    )
+    return Settings(_env_file=None, database_url="postgresql+asyncpg://u:p@localhost/db", **values)
 
 
 def test_cors_origins_parsed_from_comma_list() -> None:

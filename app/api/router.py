@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.agentic.gateway.routes import router as chat_router
 from app.api.routes import (
     actions,
     admin_itsm,
@@ -37,3 +38,4 @@ api_router.include_router(notifications.router)
 api_router.include_router(portal_notifications.router)
 api_router.include_router(integrations.router)
 api_router.include_router(admin_itsm.router)
+api_router.include_router(chat_router)

@@ -1,0 +1,41 @@
+kb_ref: KB-PRN-001
+title: Printer paper jam
+summary: Clear a receipt or checkout printer that has stopped because paper is stuck inside it.
+applies_to: [printer]
+fault_codes: [PAPER_JAM]
+kb_tags: [printer-paper-jam]
+symptoms:
+  - paper jam
+  - paper stuck in the printer
+  - printer jammed
+  - receipt torn or crumpled
+  - printer stops halfway through a receipt
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Switch the printer off, open the cover and look along the paper path for paper that is stuck.
+    ask: Can you see jammed paper?
+    outcomes:
+      jam_seen: {label: "Yes, paper is stuck", next: S2}
+      no_jam: {label: "No jammed paper", next: S3}
+  S2:
+    instruction: Gently pull the stuck paper out in the direction it feeds. Do not use scissors or sharp objects. Close the cover until it clicks and switch the printer on.
+    ask: Does the printer print a receipt now?
+    outcomes:
+      works: {label: "Yes, it prints", end: resolved}
+      not_works: {label: "Still not printing", next: S3}
+  S3:
+    instruction: Check the paper roll sits flat, feeds from underneath and the cover closes fully. Then print a test receipt from the till menu.
+    ask: Did the test receipt print?
+    outcomes:
+      works: {label: "Yes, it printed", end: resolved}
+      not_works: {label: "No, it did not", next: S4}
+  S4:
+    audience: technician
+    instruction: Remove the print head cover, check the cutter blade for paper fragments and clean the print head.
+    ask: Is the printer working after cleaning?
+    outcomes:
+      works: {label: "Working", end: resolved}
+      not_works: {label: "Not working", end: needs_technician}

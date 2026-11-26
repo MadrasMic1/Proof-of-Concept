@@ -1,0 +1,180 @@
+# config/element_catalogue.yaml
+# What each device / network element type means for a store (app/agentic/store_graph).
+# One entry per code in seed/data/master.yaml (device_types, network_element_types);
+# scripts.store_snapshot --validate checks this file against the database.
+#
+# Impact text placeholders: {name} {label} {location} {role} {remaining}
+#   {remaining} = the members of the same redundancy group that are still online.
+# faults: matched against devices.status_reason (lowercase substring, first rule wins).
+# kb_tags are what KB Guide looks up (KB articles come in Agentic Phase 3).
+version: 1
+
+services:
+  card_payments:
+    label: "Card payments"
+    synonyms: ["card payments", "payments", "card machine", "card terminal", "pin pad"]
+    via_group: "wan"
+    impact_when_down: "Card payments cannot reach the bank: the store can only take cash."
+    impact_when_degraded: "Card payments may be slower than usual."
+
+types:
+  # --- network elements ------------------------------------------------------------
+  wan_link:
+    kind: network_element
+    label: "Internet link"
+    synonyms: ["internet", "internet link", "wan", "wan link", "broadband", "isp", "primary link", "backup link", "network link"]
+    impact_when_down: "{label} is down."
+    impact_when_degraded: "{label} is unstable."
+    impact_when_failover: "{label} is down; the store is running on {remaining}. POS, card payments and Wi-Fi may be slower."
+    impact_when_reduced: "{label} is down; the store is trading normally on {remaining}, but has no backup if that link fails."
+    impact_when_group_down: "Both internet links are down: the store is offline. Card payments and online POS functions are unavailable."
+    incident_category: network
+    subcategories: ["WAN"]
+    assignment_group: "Network Ops"
+    revenue_critical: true
+  gateway:
+    kind: network_element
+    label: "SD-WAN gateway"
+    synonyms: ["gateway", "sd-wan", "sdwan", "edge device"]
+    impact_when_down: "The SD-WAN gateway {name} is down: the store has no network connection."
+    impact_when_degraded: "The SD-WAN gateway {name} is unstable."
+    incident_category: network
+    subcategories: ["WAN"]
+    assignment_group: "Network Ops"
+    revenue_critical: true
+  router:
+    kind: network_element
+    label: "ISP router"
+    synonyms: ["router", "isp router"]
+    impact_when_down: "{label} is down, so its internet link cannot carry traffic."
+    impact_when_degraded: "{label} is unstable."
+    incident_category: network
+    subcategories: ["WAN"]
+    assignment_group: "Network Ops"
+    revenue_critical: true
+  switch:
+    kind: network_element
+    label: "Network switch"
+    synonyms: ["switch", "network switch", "lan"]
+    impact_when_down: "{label} is down: everything connected through it in the {location} is offline."
+    impact_when_degraded: "{label} is unstable."
+    incident_category: network
+    subcategories: ["LAN"]
+    assignment_group: "Network Ops"
+    revenue_critical: true
+  access_point:
+    kind: network_element
+    label: "Wi-Fi access point"
+    synonyms: ["access point", "ap", "wifi", "wi-fi", "wireless"]
+    impact_when_down: "{label} is down: Wi-Fi in the {location} is weak or missing; handhelds move to other access points."
+    impact_when_degraded: "{label} is unstable: Wi-Fi in the {location} may drop."
+    incident_category: network
+    subcategories: ["Wireless"]
+    assignment_group: "Network Ops"
+    revenue_critical: false
+
+  # --- devices -----------------------------------------------------------------------
+  pos:
+    kind: device
+    label: "POS terminal"
+    synonyms: ["pos", "pos terminal", "point of sale", "terminal"]
+    impact_when_down: "{label} cannot take sales; use another checkout."
+    impact_when_degraded: "{label} is slow or intermittent."
+    incident_category: hardware
+    subcategories: ["POS"]
+    assignment_group: "Retail EUC Ops"
+    revenue_critical: true
+    faults:
+      - code: HW_FAULT
+        match: ["hardware"]
+        staff_can_fix: false
+      - code: NOT_REACHABLE
+        match: ["not reachable", "cable", "no network"]
+        staff_can_fix: true
+        kb_tags: ["device-cable", "device-power"]
+      - code: APP_ERROR
+        match: ["application", "frozen", "hang", "not responding"]
+        staff_can_fix: true
+        kb_tags: ["pos-app-restart"]
+  register:
+    kind: device
+    label: "Register"
+    synonyms: ["register", "cash register"]
+    impact_when_down: "{label} cannot take sales; use another checkout."
+    impact_when_degraded: "{label} is slow or intermittent."
+    incident_category: software
+    subcategories: ["Register"]
+    assignment_group: "Retail EUC Ops"
+    revenue_critical: true
+    faults:
+      - code: HW_FAULT
+        match: ["hardware"]
+        staff_can_fix: false
+      - code: NOT_REACHABLE
+        match: ["not reachable", "cable", "no network"]
+        staff_can_fix: true
+        kb_tags: ["device-cable", "device-power"]
+      - code: APP_ERROR
+        match: ["application", "frozen", "hang"]
+        staff_can_fix: true
+        kb_tags: ["register-app-restart"]
+  rf_gun:
+    kind: device
+    label: "RF gun"
+    synonyms: ["rf gun", "scanner", "handheld", "handheld scanner", "rf scanner", "zebra"]
+    impact_when_down: "{label} cannot be used for scanning."
+    impact_when_degraded: "{label} works intermittently."
+    incident_category: hardware
+    subcategories: ["RF Gun"]
+    assignment_group: "Retail EUC Ops"
+    revenue_critical: false
+    faults:
+      - code: BATTERY_LOW
+        match: ["battery"]
+        staff_can_fix: true
+        kb_tags: ["rf-battery"]
+      - code: WIFI_DISCONNECTED
+        match: ["wi-fi", "wifi", "wireless", "access point"]
+        staff_can_fix: true
+        kb_tags: ["rf-wifi"]
+  printer:
+    kind: device
+    label: "Printer"
+    synonyms: ["printer", "receipt printer", "label printer", "checkout printer"]
+    impact_when_down: "{label} cannot print; use another printer."
+    impact_when_degraded: "{label} prints unreliably."
+    incident_category: hardware
+    subcategories: ["Printer"]
+    assignment_group: "Retail EUC Ops"
+    revenue_critical: false
+    faults:
+      - code: HW_FAULT
+        match: ["hardware", "roller", "power supply"]
+        staff_can_fix: false
+      - code: PAPER_JAM
+        match: ["paper jam", "jam"]
+        staff_can_fix: true
+        kb_tags: ["printer-paper-jam"]
+      - code: PAPER_OUT
+        match: ["paper out", "out of paper", "no paper"]
+        staff_can_fix: true
+        kb_tags: ["printer-paper"]
+      - code: POWER_OFF
+        match: ["powered off", "not powering", "no power"]
+        staff_can_fix: true
+        kb_tags: ["printer-power"]
+  workstation:
+    kind: device
+    label: "Workstation"
+    synonyms: ["workstation", "pc", "computer", "desktop", "back office pc"]
+    impact_when_down: "{label} cannot be used."
+    impact_when_degraded: "{label} is slow or intermittent."
+    incident_category: hardware
+    subcategories: ["Workstation"]
+    assignment_group: "Retail EUC Ops"
+    revenue_critical: false
+    faults:
+      - code: NOT_REACHABLE
+        match: ["not reachable", "cable", "powered off", "no network"]
+        staff_can_fix: true
+        kb_tags: ["device-cable", "device-power"]

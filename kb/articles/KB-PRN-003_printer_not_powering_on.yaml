@@ -1,0 +1,33 @@
+kb_ref: KB-PRN-003
+title: Printer not powering on
+summary: Get a printer that is switched off or has no power light working again.
+applies_to: [printer]
+fault_codes: [POWER_OFF]
+kb_tags: [printer-power]
+symptoms:
+  - printer powered off
+  - printer not powering on
+  - no power light
+  - printer dead
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Check the power cable is pushed in firmly at the back of the printer and at the wall socket or power strip, and that the power switch is on.
+    ask: Is the printer's power light on now?
+    outcomes:
+      light_on: {label: "Light is on", next: S3}
+      light_off: {label: "Still no light", next: S2}
+  S2:
+    instruction: Plug another small device, such as a phone charger, into the same socket to check the socket works. If it does not, move the printer to a working socket.
+    ask: Is the printer's power light on now?
+    outcomes:
+      light_on: {label: "Light is on", next: S3}
+      light_off: {label: "Still no light", end: needs_technician}
+  S3:
+    instruction: Print a test receipt from the till menu.
+    ask: Did the test receipt print?
+    outcomes:
+      works: {label: "Yes, it printed", end: resolved}
+      not_works: {label: "No, it did not", end: exhausted}

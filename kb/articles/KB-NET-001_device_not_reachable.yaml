@@ -1,0 +1,34 @@
+kb_ref: KB-NET-001
+title: Device not reachable - check cable and power
+summary: Reconnect a POS terminal, register or workstation that has dropped off the network.
+applies_to: [pos, register, workstation]
+fault_codes: [NOT_REACHABLE]
+kb_tags: [device-cable, device-power]
+symptoms:
+  - device not reachable
+  - no network
+  - offline
+  - cannot connect
+  - network cable unplugged
+audience: store_staff
+estimated_minutes: 5
+start: S1
+steps:
+  S1:
+    instruction: Look at the back of the device. Check the network cable clicks in at both ends and the power cable is connected.
+    ask: Was a cable loose?
+    outcomes:
+      cable_loose: {label: "Yes, a cable was loose", next: S2}
+      cables_fine: {label: "Cables look fine", next: S3}
+  S2:
+    instruction: Push the loose cable in until it clicks, then wait two minutes for the device to reconnect.
+    ask: Is the device working again?
+    outcomes:
+      works: {label: "Yes, working", end: resolved}
+      not_works: {label: "Still offline", next: S3}
+  S3:
+    instruction: Restart the device - shut it down from its menu, wait 30 seconds, switch it on and wait two minutes after it starts.
+    ask: Is the device working again?
+    outcomes:
+      works: {label: "Yes, working", end: resolved}
+      not_works: {label: "Still offline", end: needs_technician}
