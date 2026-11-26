@@ -1,11 +1,12 @@
 name: RIC Backend - DevSecOps CI/CD (Private Docker Hub)
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*.*.*"]
+  #push:
+    #branches: [main]
+    #tags: ["v*.*.*"]
   pull_request:
     branches: [main]
+    tags: ["v*.*.*"]
 
 permissions:
   contents: read

@@ -83,7 +83,17 @@ class Settings(BaseSettings):
     # How often the running worker expires overdue store actions.
     worker_sweep_seconds: float = Field(default=60.0, ge=5, le=3600)
 
-    # --- ITSM / GLPI (Stage 2) ---------------------------------------------------------
+    # --- ITSM / GLPI/Servicenow (Stage 2) ---------------------------------------------------------
+    # --- ServiceNow (ITSM) ---
+    servicenow_instance_url: str | None = None
+    servicenow_username: str | None = None
+    servicenow_password: SecretStr | None = None
+    servicenow_timeout_seconds: float = 30.0
+    servicenow_default_assignment_group: str | None = "Store IT Support"
+    # --- Dynatrace (Monitoring) ---
+    dynatrace_base_url: str | None = None
+    dynatrace_api_token: SecretStr | None = None
+    dynatrace_timeout_seconds: float = 15.0
     # The ITSM of record. RIC reads its own database; GLPI changes reach it through
     # webhooks and a reconciliation job. Values: see the ITSM section of .env.example.
     itsm_provider: Literal["glpi"] = "glpi"
